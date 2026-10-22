@@ -488,6 +488,7 @@ async def cmd_start(m: Message, command: CommandObject):
                  "/del Ник - удалить\n"
                  "/import - заменить весь список (строки: ник ELO K/D победы)\n"
                  "/link Ник ID_в_игре - привязать аватарку игрока к нику в топе\n"
+                 "/resetid ID_в_игре - сбросить ID игрока (если ошибся)\n"
                  "/matches - спорные и активные матчи\n"
                  "/winner ID 1|2 - назначить победителя\n"
                  "/cancelmatch ID - отменить матч")
@@ -699,6 +700,27 @@ async def cmd_link(m: Message, command: CommandObject):
     await m.answer("Готово.")
 
 
+@router.message(Command("resetid"))
+async def cmd_resetid(m: Message, command: CommandObject):
+    # сброс ID в игре (если игрок ошибся): /resetid ID_в_игре
+    if not is_admin(m):
+        return await m.answer("Нет доступа.")
+    gid = (command.args or "").strip()
+    if not gid:
+        return await m.answer("Формат: /resetid ID_в_игре")
+    async with lock:
+        db = db_load()
+        u = next((x for x in db["users"].values() if (x.get("game_id") or "") == gid), None)
+        if not u:
+            return await m.answer("Игрок с таким ID не найден.")
+        if queue_of(db, uid_of(u)) or match_of(db, uid_of(u)):
+            return await m.answer("Игрок сейчас в поиске или матче, попробуйте позже.")
+        u["game_id"] = ""
+        db_save(db)
+    await m.answer(f"ID сброшен у {u['nick']}.")
+    await flush([(u["tg_id"], "Администратор сбросил ваш ID в игре. Укажите правильный ID на сайте, он вводится один раз.", None)])
+
+
 # ---------- API сайта ----------
 def api(auth: bool = True):
     """Обёртка: блокировка, загрузка базы, авторизация, сохранение, уведомления в бота."""
@@ -799,6 +821,11 @@ def api_profile(request, db, user, body, outbox, ctx):
     user["nick"] = clean_str(body.get("nick"), 32, "Ник", 2)
     user["about"] = clean_str(body.get("about"), 300, "О себе")
     gid = clean_str(body.get("game_id"), 20, "ID в игре")
+    cur = user.get("game_id", "")
+    if cur and gid in ("", cur):
+        gid = cur
+    elif cur:
+        raise ApiError(400, "ID в игре нельзя изменить. Если ошиблись, напишите администратору")
     if gid:
         if not re.fullmatch(r"[0-9]{3,20}", gid):
             raise ApiError(400, "ID в игре: только цифры, от 3 до 20")
@@ -1043,6 +1070,21 @@ def api_pinvite_resolve(request, db, user, body, outbox, ctx):
     return {"message": resolve_pinvite(db, iid, user, act == "accept", outbox)}
 
 
+# --- ID в игре: вводится один раз и навсегда ---
+@api()
+def api_game_id(request, db, user, body, outbox, ctx):
+    if user.get("game_id"):
+        raise ApiError(400, "ID уже указан и не меняется")
+    gid = clean_str(body.get("game_id"), 20, "ID в игре", 3)
+    if not re.fullmatch(r"[0-9]{3,20}", gid):
+        raise ApiError(400, "ID в игре: только цифры, от 3 до 20")
+    me = uid_of(user)
+    if any(k != me and (v.get("game_id") or "") == gid for k, v in db["users"].items()):
+        raise ApiError(400, "Этот ID уже занят другим игроком")
+    user["game_id"] = gid
+    return {"message": "ID сохранён"}
+
+
 # --- поиск игры и матч ---
 @api()
 def api_queue_start(request, db, user, body, outbox, ctx):
@@ -1063,6 +1105,10 @@ def api_queue_start(request, db, user, body, outbox, ctx):
     for m in members:
         if match_of(db, m) or queue_of(db, m):
             raise ApiError(400, "Кто-то из пати уже в матче или поиске")
+    for m in members:
+        if not db["users"].get(m, {}).get("game_id"):
+            raise ApiError(400, "Сначала укажите ID в игре" if m == me
+                           else f"У игрока {db['users'][m]['nick']} не указан ID в игре")
     tid = secrets.token_hex(4)
     db["queue"][tid] = {"id": tid, "owner": me, "party": pid, "members": members,
                         "size": size, "joined": time.time()}
@@ -1332,6 +1378,7 @@ async def main():
         web.post("/api/party/leave", api_party_leave),
         web.post("/api/party/kick", api_party_kick),
         web.post("/api/pinvites/{id}/{act:accept|decline|cancel}", api_pinvite_resolve),
+        web.post("/api/game_id", api_game_id),
         web.post("/api/queue/start", api_queue_start),
         web.post("/api/queue/cancel", api_queue_cancel),
         web.post("/api/match/cancel", api_match_cancel),

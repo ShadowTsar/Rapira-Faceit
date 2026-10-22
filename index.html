@@ -240,15 +240,22 @@ function resizeAvatar(f){
     img.onerror=function(){URL.revokeObjectURL(url);rej(new Error("Не удалось открыть изображение"))};
     img.src=url})}
 function avatarBlock(u){
-  var fi=h("input",{type:"file",accept:"image/*",hidden:true,"aria-label":"Фото профиля"});
-  fi.addEventListener("change",function(){var f=fi.files[0];if(!f)return;
+  var fi=h("input",{type:"file",id:"avfile",accept:"image/*","aria-label":"Выбрать фото из галереи",
+    style:"position:absolute;width:1px;height:1px;opacity:0;overflow:hidden;pointer-events:none"});
+  fi.addEventListener("change",function(){var f=fi.files[0];fi.value="";if(!f)return;
+    toast("Загружаю фото…");
     resizeAvatar(f).then(function(b){return fetch("/api/shots/avatar",{method:"POST",headers:{Authorization:"Bearer "+TOKEN,"Content-Type":"image/jpeg"},body:b})})
       .then(function(r){return r.json().catch(function(){return{}}).then(function(d){if(!r.ok)throw new Error(d.error||"Ошибка "+r.status)})})
       .then(function(){toast("Фото обновлено");loadMe().then(route)}).catch(function(e){toast(e.message,true)})});
-  return h("div",{class:"who",style:"margin:8px 0 12px;gap:14px"},av(u,84),
-    h("div",{},h("div",{class:"row",style:"margin-top:0"},h("button",{class:"btn sm",type:"button",text:"Загрузить фото",onclick:function(){fi.click()}}),
+  return h("div",{class:"who",style:"margin:8px 0 12px;gap:14px;position:relative"},
+    h("label",{for:"avfile",style:"cursor:pointer","aria-label":"Сменить фото"},av(u,84)),
+    h("div",{},h("div",{class:"row",style:"margin-top:0"},h("label",{for:"avfile",class:"btn sm",text:"Выбрать из галереи"}),
       u.av?h("button",{class:"btn danger sm",type:"button",text:"Удалить",onclick:function(){act("/api/avatar/delete",{},"Фото удалено")}}):null),
-      h("p",{class:"muted",style:"margin:6px 0 0",text:"Фото обрежется до квадрата. Его увидят в друзьях, пати и матчах."}),fi))}
+      h("p",{class:"muted",style:"margin:6px 0 0",text:"Нажмите на фото или кнопку и выберите снимок из галереи. Он обрежется до квадрата."})),fi)}
+var NEEDID=false;
+function startSearch(size){
+  if(S.me&&S.me.user&&S.me.user.game_id){act("/api/queue/start",{size:size});return}
+  NEEDID=true;toast("Сначала укажите ID в игре в профиле",true);go("me")}
 
 /* ---------- общие кусочки ---------- */
 function tgLink(u){return u&&/^\w{3,}$/.test(u)?h("a",{href:"https://t.me/"+u,target:"_blank",rel:"noopener",text:"@"+u}):null}
@@ -314,7 +321,9 @@ function drawFind(box,u,pd,friends){
   box.appendChild(h("div",{class:"seg"},MODES.map(function(m){return h("button",{class:"btn"+(size===m[0]?"":" ghost"),text:m[1],disabled:!leader,onclick:function(){
     if(p)act("/api/party/size",{size:m[0]});else{LOBBY.size=m[0];renderFind()}}})})));
   var members=p?p.members:[{pid:u.pid,nick:u.nick,av:u.av||0,game_id:u.game_id||"",leader:true}],invited=p?p.invited:[];
-  if(leader)box.appendChild(h("button",{class:"btn big",text:"🔍 Найти игру "+size+"×"+size,onclick:function(){act("/api/queue/start",{size:size})}}));
+  if(!u.game_id)box.appendChild(h("div",{class:"card"},h("p",{class:"meta",text:"Чтобы искать игру, укажите ID в игре. Он вводится один раз и навсегда."}),
+    h("button",{class:"btn sm",type:"button",text:"Указать ID",onclick:function(){NEEDID=true;go("me")}})));
+  if(leader)box.appendChild(h("button",{class:"btn big",text:"🔍 Найти игру "+size+"×"+size,onclick:function(){startSearch(size)}}));
   else box.appendChild(h("p",{class:"muted",text:"Поиск запускает лидер пати"}));
   box.appendChild(h("div",{class:"pty-h"},h("span",{text:"ПАТИ"}),h("span",{},h("b",{text:members.length}),"/"+size)));
   var slots=h("div",{class:"pty",style:"--n:"+size});
@@ -445,8 +454,11 @@ function renderMe(){
   loadMe().then(function(){
     var d=S.me;
     if(!d.user){me.appendChild(loginCard());return}
+    if(!d.user.game_id)me.appendChild(h("div",{class:"card"},h("b",{text:"Укажите ID в игре"}),
+      h("p",{class:"meta",text:"Без ID играть нельзя: по нему игроки матча находят друг друга. Введите его в поле «ID в игре» ниже и нажмите «Сохранить». ID вводится один раз и навсегда."})));
     me.appendChild(accountCard(d.user));
     me.appendChild(profileCard(d.user));
+    if(NEEDID&&!d.user.game_id)setTimeout(function(){var g=$("#gidf");if(g){g.scrollIntoView({block:"center"});g.focus()}},100);
   }).catch(function(e){me.appendChild(h("div",{class:"empty",text:e.message}))})}
 function loginCard(){
   var st=h("p",{class:"muted"});var btn=h("button",{class:"btn",text:"Войти через Telegram",onclick:function(){start()}});
@@ -473,13 +485,16 @@ function accountCard(u){
       call("/api/logout",{}).catch(function(){}).then(function(){setToken(null);S.me=null;renderNav();route()})}})))}
 function field(label,el){return h("label",{},h("span",{text:label}),el)}
 function profileCard(u){
-  var nick=h("input",{maxlength:32,required:true,value:u.nick}),gid=h("input",{maxlength:20,value:u.game_id||"",placeholder:"Только цифры",autocomplete:"off",inputmode:"numeric",pattern:"[0-9]*"}),
+  var nick=h("input",{maxlength:32,required:true,value:u.nick}),gid=h("input",{id:"gidf",maxlength:20,value:u.game_id||"",disabled:!!u.game_id,placeholder:"Только цифры",autocomplete:"off",inputmode:"numeric",pattern:"[0-9]*"}),
     about=h("textarea",{maxlength:300,rows:3,placeholder:"Опыт, часы в игре, когда играете"},u.about);
-  var f=h("form",{class:"form"},field("Ник",nick),field("ID в игре",gid),h("p",{class:"muted",text:"Введите тот же ID, что и в игре: по нему вас найдут друзья. Только цифры."}),field("О себе",about),
+  var f=h("form",{class:"form"},field("Ник",nick),field("ID в игре",gid),h("p",{class:"muted",text:u.game_id?"ID сохранён и больше не меняется. Если ошиблись, напишите администратору.":"Введите ID из игры. Вводится один раз и навсегда: потом изменить его нельзя. Только цифры."}),field("О себе",about),
     h("div",{class:"row"},h("button",{class:"btn",type:"submit",text:"Сохранить"})));
   gid.addEventListener("input",function(){gid.value=gid.value.replace(/\D/g,"")});
   f.addEventListener("submit",function(e){e.preventDefault();
-    act("/api/profile",{nick:nick.value,game_id:gid.value,about:about.value},"Профиль сохранён")});
+    var first=!u.game_id&&gid.value.trim();
+    if(first&&!confirm("ID "+gid.value.trim()+" нельзя будет изменить. Сохранить?"))return;
+    act("/api/profile",{nick:nick.value,game_id:gid.value,about:about.value},"Профиль сохранён").then(function(){
+      if(first&&NEEDID&&S.me&&S.me.user&&S.me.user.game_id){NEEDID=false;toast("ID сохранён, можно искать игру");go("find")}})});
   return h("div",{class:"card"},h("h2",{text:"Профиль"}),f)}
 
 /* ---------- демо-режим: включается сам, если сервера бота нет ---------- */
