@@ -8,6 +8,8 @@
   DATA_FILE     - файл с топом игроков (по умолчанию data.json)
   APP_FILE      - файл с пользователями, командами, заявками (по умолчанию app.json)
   BOT_USERNAME  - необязательно, @username бота (иначе берётся через getMe)
+  SHOTS_DIR     - папка для скриншотов матчей (по умолчанию shots рядом с APP_FILE)
+  AVATARS_DIR   - папка для аватарок (по умолчанию avatars рядом с APP_FILE)
 
 Важно: DATA_FILE и APP_FILE должны лежать на постоянном диске хостинга.
 """
@@ -27,7 +29,7 @@ from urllib.parse import parse_qsl
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import (CallbackQuery, InlineKeyboardButton,
-                           InlineKeyboardMarkup, Message, WebAppInfo)
+                           InlineKeyboardMarkup, Message, WebAppInfo, FSInputFile)
 from aiohttp import web
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
@@ -39,6 +41,13 @@ APP_FILE = Path(os.getenv("APP_FILE", "app.json"))
 BOT_USERNAME = os.getenv("BOT_USERNAME", "").lstrip("@")
 BASE = Path(__file__).parent
 TOP_N = 100
+SHOTS_DIR = Path(os.getenv("SHOTS_DIR", str(APP_FILE.parent / "shots")))
+MAX_SHOT = 5 * 1024 * 1024
+AVATARS_DIR = Path(os.getenv("AVATARS_DIR", str(APP_FILE.parent / "avatars")))
+MAX_AVATAR = 2 * 1024 * 1024
+QUEUE_TTL = 3600           # поиск без матча сбрасывается через час
+MATCH_TTL = 6 * 3600       # активный матч без результата отменяется через 6 часов
+KEEP_DAYS = 3              # сколько хранить завершённые матчи и скриншоты
 
 SIZES = (3, 4, 5)  # пати 3x3, 4x4, 5x5
 SESSION_TTL = 30 * 24 * 3600
@@ -127,7 +136,7 @@ def db_load() -> dict:
             d = json.loads(APP_FILE.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             d = {}
-    for k in ("users", "sessions", "codes", "friends", "freqs", "parties", "pinvites"):
+    for k in ("users", "sessions", "codes", "friends", "freqs", "parties", "pinvites", "queue", "matches"):
         d.setdefault(k, {})
     return d
 
@@ -142,6 +151,18 @@ def cleanup(db: dict) -> None:
         del db["codes"][k]
     for k in [k for k, v in db["sessions"].items() if v["exp"] < t]:
         del db["sessions"][k]
+    for k in [k for k, v in db["queue"].items() if v["joined"] < t - QUEUE_TTL]:
+        del db["queue"][k]
+    for mid, m in list(db["matches"].items()):
+        if m["status"] == "active" and m["created"] < t - MATCH_TTL:
+            m["status"], m["ended"] = "cancelled", int(t)
+        elif m["status"] in ("finished", "cancelled") and m.get("ended", 0) < t - KEEP_DAYS * 86400:
+            for f in SHOTS_DIR.glob(f"{mid}_*"):
+                try:
+                    f.unlink()
+                except OSError:
+                    pass
+            del db["matches"][mid]
 
 
 def ensure_user(db: dict, tg_id: int, username, first_name) -> dict:
@@ -180,7 +201,7 @@ def user_by_pid(db: dict, pid: str):
 
 def pub(u: dict) -> dict:
     return {"pid": u["pid"], "nick": u["nick"], "game_id": u.get("game_id", ""),
-            "about": u.get("about", "")}
+            "about": u.get("about", ""), "av": u.get("avatar", 0)}
 
 
 def are_friends(db, a, b) -> bool:
@@ -238,6 +259,138 @@ def accept_kb(prefix: str, rid: str):
     return [("✅ Принять", f"{prefix}:acc:{rid}"), ("❌ Отклонить", f"{prefix}:dec:{rid}")]
 
 
+# ---------- поиск игры, матчи, скриншоты ----------
+def team_idx(m, uid):
+    for i, t in enumerate(m["teams"]):
+        if uid in t["members"]:
+            return i
+    return None
+
+
+def queue_of(db, uid):
+    return next((t for t in db["queue"].values() if uid in t["members"]), None)
+
+
+def party_in_queue(db, p) -> bool:
+    return bool(p) and any(t.get("party") == p["id"] for t in db["queue"].values())
+
+
+def match_of(db, uid):
+    # активный матч игрока
+    return next((m for m in db["matches"].values()
+                 if m["status"] == "active" and team_idx(m, uid) is not None), None)
+
+
+def find_split(tickets, n):
+    # ищем две непересекающиеся группы заявок, каждая ровно на n игроков;
+    # пати не разбиваются, самые старые заявки берутся первыми
+    sizes = [len(t["members"]) for t in tickets[:40]]
+    seen = set()
+
+    def dfs(i, a, b, ga, gb):
+        if a == n and b == n:
+            return ga, gb
+        if i == len(sizes) or (i, a, b) in seen:
+            return None
+        seen.add((i, a, b))
+        sz = sizes[i]
+        if a + sz <= n:
+            r = dfs(i + 1, a + sz, b, ga + [i], gb)
+            if r:
+                return r
+        if b + sz <= n:
+            r = dfs(i + 1, a, b + sz, ga, gb + [i])
+            if r:
+                return r
+        return dfs(i + 1, a, b, ga, gb)
+
+    return dfs(0, 0, 0, [], [])
+
+
+def room_kb():
+    if PUBLIC_URL.startswith("https://"):
+        return [("Открыть комнату", "url:" + PUBLIC_URL + "/#find")]
+    return None
+
+
+def try_match(db, n, outbox):
+    while True:
+        tickets = sorted((t for t in db["queue"].values() if t["size"] == n), key=lambda t: t["joined"])
+        res = find_split(tickets, n)
+        if not res:
+            return
+        teams = []
+        for g in res:
+            members = [u for i in g for u in tickets[i]["members"]]
+            teams.append({"members": members, "captain": secrets.choice(members)})  # капитан случайный
+        for i in res[0] + res[1]:
+            db["queue"].pop(tickets[i]["id"], None)
+        mid = secrets.token_hex(4)
+        db["matches"][mid] = {"id": mid, "size": n, "status": "active", "created": int(time.time()),
+                              "teams": teams, "shots": [], "report": None, "cancel_votes": []}
+        for ti, t in enumerate(teams, start=1):
+            cap = db["users"][t["captain"]]
+            for uid in t["members"]:
+                u = db["users"].get(uid)
+                if not u:
+                    continue
+                if uid == t["captain"]:
+                    role = ("Вы капитан команды: после игры сделайте скриншот результата "
+                            "и прикрепите его в комнате матча.")
+                else:
+                    role = f"Капитан вашей команды: {cap['nick']} ({tg_tag(cap)})."
+                outbox.append((u["tg_id"], f"Матч {n}x{n} найден! Вы в команде {ti}.\n{role}", room_kb()))
+
+
+def end_match(db, m, status, outbox, text, winner=None):
+    m["status"], m["ended"] = status, int(time.time())
+    if winner is not None:
+        m["winner"] = winner
+    for t in m["teams"]:
+        for uid in t["members"]:
+            u = db["users"].get(uid)
+            if u:
+                outbox.append((u["tg_id"], text, None))
+
+
+def notify_admins_dispute(db, m, outbox):
+    lines = [f"Спорный матч {m['id']} ({m['size']}x{m['size']})"]
+    for i, t in enumerate(m["teams"], start=1):
+        names = ", ".join(db["users"][u]["nick"] + (" (кап.)" if u == t["captain"] else "")
+                          for u in t["members"] if u in db["users"])
+        lines.append(f"Команда {i}: {names}")
+    r = m.get("report") or {}
+    lines.append(f"Заявлено: победила команда {r.get('winner', 0) + 1}, счёт {r.get('score') or '-'}")
+    lines.append(f"Решение: /winner {m['id']} 1  или  /winner {m['id']} 2\nОтмена: /cancelmatch {m['id']}")
+    for a in ADMIN_IDS:
+        outbox.append((a, "\n".join(lines), None))
+        for sh in m["shots"][:6]:
+            path = SHOTS_DIR / f"{m['id']}_{sh['id']}.{sh['ext']}"
+            if path.is_file():
+                outbox.append((a, f"Скриншот: команда {sh['team'] + 1}", None, str(path)))
+
+
+def match_view(db, m, me):
+    ti = team_idx(m, me)
+    teams = []
+    for t in m["teams"]:
+        mem = []
+        for uid in t["members"]:
+            u = db["users"].get(uid)
+            if not u:
+                continue
+            d = {**pub(u), "captain": uid == t["captain"], "me": uid == me}
+            if uid == t["captain"] and u.get("tg_username"):
+                d["tg"] = u["tg_username"]  # Telegram виден только у капитанов, чтобы договориться о лобби
+            mem.append(d)
+        teams.append({"members": mem})
+    rep = m.get("report")
+    return {"id": m["id"], "size": m["size"], "team": ti, "captain": m["teams"][ti]["captain"] == me,
+            "teams": teams, "shots": [{"id": x["id"], "team": x["team"]} for x in m["shots"]],
+            "report": {"team": rep["team"], "winner": rep["winner"], "score": rep["score"]} if rep else None,
+            "cancel_votes": m["cancel_votes"]}
+
+
 # ---------- заявки в друзья и приглашения в пати (общая логика для сайта и бота) ----------
 def resolve_freq(db, rid, actor, accept, outbox) -> str:
     if actor is None:
@@ -277,6 +430,10 @@ def resolve_pinvite(db, iid, actor, accept, outbox) -> str:
         return "Приглашение отклонено"
     if party_of(db, me):
         raise ApiError(400, "Вы уже в пати - сначала выйдите из неё")
+    if queue_of(db, me):
+        raise ApiError(400, "Сначала отмените поиск игры")
+    if party_in_queue(db, p):
+        raise ApiError(400, "Эта пати уже ищет игру")
     if len(p["members"]) >= p["size"]:
         raise ApiError(400, "В пати нет свободных мест")
     p["members"].append(me)
@@ -290,13 +447,19 @@ def resolve_pinvite(db, iid, actor, accept, outbox) -> str:
 
 
 async def flush(outbox: list) -> None:
-    for tg_id, text, kb in outbox:
+    for item in outbox:
+        tg_id, text, kb = item[:3]
+        photo = item[3] if len(item) > 3 else None
         try:
             markup = None
             if kb:
                 markup = InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(text=t, callback_data=d) for t, d in kb]])
-            await bot.send_message(tg_id, text, reply_markup=markup)
+                    InlineKeyboardButton(text=t, url=d[4:]) if d.startswith("url:")
+                    else InlineKeyboardButton(text=t, callback_data=d) for t, d in kb]])
+            if photo:
+                await bot.send_photo(tg_id, FSInputFile(photo), caption=text)
+            else:
+                await bot.send_message(tg_id, text, reply_markup=markup)
         except Exception:
             logging.warning("Не удалось отправить сообщение %s", tg_id)
 
@@ -323,7 +486,11 @@ async def cmd_start(m: Message, command: CommandObject):
         text += ("\n\nКоманды админа:\n"
                  "/elo Ник 4210 [K/D] [победы] - добавить или изменить\n"
                  "/del Ник - удалить\n"
-                 "/import - заменить весь список (строки: ник ELO K/D победы)")
+                 "/import - заменить весь список (строки: ник ELO K/D победы)\n"
+                 "/link Ник ID_в_игре - привязать аватарку игрока к нику в топе\n"
+                 "/matches - спорные и активные матчи\n"
+                 "/winner ID 1|2 - назначить победителя\n"
+                 "/cancelmatch ID - отменить матч")
     kb = None
     if PUBLIC_URL.startswith("https://"):
         kb = InlineKeyboardMarkup(inline_keyboard=[[
@@ -453,11 +620,83 @@ async def cmd_import(m: Message, command: CommandObject):
     if not data:
         return await m.answer("Не удалось разобрать ни одной строки.")
     async with lock:
+        old = {p["nick"].lower(): p["pid"] for p in load() if p.get("pid")}  # сохраняем привязки аватарок
+        for p in data:
+            if p["nick"].lower() in old:
+                p["pid"] = old[p["nick"].lower()]
         save(data)
     msg = f"Список заменён, игроков: {len(data)}"
     if bad:
         msg += f"\nПропущено строк: {len(bad)}"
     await m.answer(msg)
+
+
+@router.message(Command("matches"))
+async def cmd_matches(m: Message):
+    if not is_admin(m):
+        return await m.answer("Нет доступа.")
+    async with lock:
+        db = db_load()
+        rows = [x for x in db["matches"].values() if x["status"] in ("disputed", "active")]
+    if not rows:
+        return await m.answer("Спорных и активных матчей нет.")
+    await m.answer("\n".join(f"{x['id']} - {x['status']} ({x['size']}x{x['size']})" for x in rows[:30]))
+
+
+async def _admin_finish(m: Message, command: CommandObject, cancel: bool):
+    if not is_admin(m):
+        return await m.answer("Нет доступа.")
+    parts = (command.args or "").split()
+    if not parts or (not cancel and (len(parts) < 2 or parts[1] not in ("1", "2"))):
+        return await m.answer("Формат: /cancelmatch ID  или  /winner ID 1|2")
+    outbox = []
+    async with lock:
+        db = db_load()
+        mt = db["matches"].get(parts[0])
+        if not mt or mt["status"] not in ("active", "disputed"):
+            return await m.answer("Такого матча нет или он уже закрыт.")
+        if cancel:
+            end_match(db, mt, "cancelled", outbox, "Матч отменён администратором.")
+        else:
+            w = int(parts[1]) - 1
+            end_match(db, mt, "finished", outbox, f"Администратор определил результат: победила команда {w + 1}.", winner=w)
+        db_save(db)
+    await m.answer("Готово.")
+    await flush(outbox)
+
+
+@router.message(Command("winner"))
+async def cmd_winner(m: Message, command: CommandObject):
+    await _admin_finish(m, command, False)
+
+
+@router.message(Command("cancelmatch"))
+async def cmd_cancelmatch(m: Message, command: CommandObject):
+    await _admin_finish(m, command, True)
+
+
+@router.message(Command("link"))
+async def cmd_link(m: Message, command: CommandObject):
+    # привязка ника из топа к зарегистрированному игроку, чтобы в топе показывалась его аватарка
+    if not is_admin(m):
+        return await m.answer("Нет доступа.")
+    parts = (command.args or "").split()
+    if len(parts) != 2:
+        return await m.answer("Формат: /link Ник ID_в_игре  (отвязать: /link Ник off)")
+    async with lock:
+        data, db = load(), db_load()
+        p = next((x for x in data if x["nick"].lower() == parts[0].lower()), None)
+        if not p:
+            return await m.answer("Такого ника нет в топе.")
+        if parts[1].lower() == "off":
+            p.pop("pid", None)
+        else:
+            u = next((x for x in db["users"].values() if (x.get("game_id") or "") == parts[1]), None)
+            if not u:
+                return await m.answer("Игрок с таким ID в игре не зарегистрирован на сайте.")
+            p["pid"] = u["pid"]
+        save(data)
+    await m.answer("Готово.")
 
 
 # ---------- API сайта ----------
@@ -666,6 +905,7 @@ def api_friend_remove(request, db, user, body, outbox, ctx):
 # --- пати ---
 def party_view(db, p, me):
     return {"id": p["id"], "size": p["size"], "leader": p["owner"] == me,
+            "in_queue": party_in_queue(db, p),
             "members": [{**pub(db["users"][m]), "leader": m == p["owner"]}
                         for m in p["members"] if m in db["users"]],
             "invited": [{"id": i["id"], "user": pub(db["users"][i["to"]])}
@@ -682,7 +922,24 @@ def api_party(request, db, user, body, outbox, ctx):
         if i["to"] == me and ip and ip["owner"] in db["users"]:
             invites.append({"id": i["id"], "size": ip["size"], "count": len(ip["members"]),
                             "from": pub(db["users"][ip["owner"]])})
-    return {"party": party_view(db, p, me) if p else None, "invites": invites}
+    t = queue_of(db, me)
+    queue = None
+    if t:
+        queue = {"size": t["size"], "need": 2 * t["size"], "elapsed": int(time.time() - t["joined"]),
+                 "waiting": sum(len(x["members"]) for x in db["queue"].values() if x["size"] == t["size"]),
+                 "can_cancel": t["owner"] == me}
+    m = match_of(db, me)
+    last = None
+    for mm in sorted(db["matches"].values(), key=lambda x: x.get("ended", 0), reverse=True):
+        ti = team_idx(mm, me)
+        if mm["status"] != "active" and ti is not None and mm.get("ended", 0) > time.time() - 3600:
+            res = None
+            if mm["status"] == "finished":
+                res = "win" if mm.get("winner") == ti else "lose"
+            last = {"status": mm["status"], "result": res}
+            break
+    return {"party": party_view(db, p, me) if p else None, "invites": invites,
+            "queue": queue, "match": match_view(db, m, me) if m else None, "last": last}
 
 
 def _size(v):
@@ -703,6 +960,8 @@ def api_party_invite(request, db, user, body, outbox, ctx):
         raise ApiError(400, "Приглашать можно только друзей")
     tid = uid_of(target)
     p = party_of(db, me)
+    if party_in_queue(db, p) or (not p and queue_of(db, me)):
+        raise ApiError(400, "Сначала отмените поиск игры")
     if p and p["owner"] != me:
         raise ApiError(403, "Приглашает только лидер пати")
     if party_of(db, tid):
@@ -729,6 +988,8 @@ def api_party_size(request, db, user, body, outbox, ctx):
     p = party_of(db, me)
     if not p or p["owner"] != me:
         raise ApiError(403, "Режим меняет лидер пати")
+    if party_in_queue(db, p):
+        raise ApiError(400, "Сначала отмените поиск игры")
     n = _size(body.get("size"))
     if n < len(p["members"]) + len(pending_invites(db, p["id"])):
         raise ApiError(400, "Сначала исключите игроков или отмените приглашения")
@@ -742,6 +1003,8 @@ def api_party_leave(request, db, user, body, outbox, ctx):
     p = party_of(db, me)
     if not p:
         raise ApiError(400, "Вы не в пати")
+    if party_in_queue(db, p):
+        raise ApiError(400, "Сначала отмените поиск игры")
     p["members"].remove(me)
     if not p["members"]:
         drop_party(db, p)
@@ -760,6 +1023,8 @@ def api_party_kick(request, db, user, body, outbox, ctx):
     target = user_by_pid(db, str(body.get("pid") or ""))
     if not p or p["owner"] != me or not target or uid_of(target) not in p["members"] or uid_of(target) == me:
         raise ApiError(400, "Нельзя исключить этого игрока")
+    if party_in_queue(db, p):
+        raise ApiError(400, "Сначала отмените поиск игры")
     p["members"].remove(uid_of(target))
     outbox.append((target["tg_id"], "Вас исключили из пати.", None))
     return {"ok": True}
@@ -776,6 +1041,219 @@ def api_pinvite_resolve(request, db, user, body, outbox, ctx):
         del db["pinvites"][iid]
         return {"message": "Приглашение отменено"}
     return {"message": resolve_pinvite(db, iid, user, act == "accept", outbox)}
+
+
+# --- поиск игры и матч ---
+@api()
+def api_queue_start(request, db, user, body, outbox, ctx):
+    me = uid_of(user)
+    if match_of(db, me):
+        raise ApiError(400, "Вы уже в матче")
+    if queue_of(db, me):
+        raise ApiError(400, "Поиск уже идёт")
+    p = party_of(db, me)
+    if p:
+        if p["owner"] != me:
+            raise ApiError(403, "Поиск запускает лидер пати")
+        members, size, pid = list(p["members"]), p["size"], p["id"]
+        for k in [k for k, v in db["pinvites"].items() if v["party"] == pid]:
+            del db["pinvites"][k]  # неотвеченные приглашения снимаем
+    else:
+        members, size, pid = [me], _size(body.get("size", 5)), None
+    for m in members:
+        if match_of(db, m) or queue_of(db, m):
+            raise ApiError(400, "Кто-то из пати уже в матче или поиске")
+    tid = secrets.token_hex(4)
+    db["queue"][tid] = {"id": tid, "owner": me, "party": pid, "members": members,
+                        "size": size, "joined": time.time()}
+    try_match(db, size, outbox)
+    return {"message": "Матч найден!" if match_of(db, me) else "Ищем игру…"}
+
+
+@api()
+def api_queue_cancel(request, db, user, body, outbox, ctx):
+    me = uid_of(user)
+    t = queue_of(db, me)
+    if not t:
+        raise ApiError(400, "Вы не в поиске")
+    if t["owner"] != me:
+        raise ApiError(403, "Поиск отменяет лидер пати")
+    del db["queue"][t["id"]]
+    for m in t["members"]:
+        if m != me and m in db["users"]:
+            outbox.append((db["users"][m]["tg_id"], "Лидер отменил поиск игры.", None))
+    return {"message": "Поиск отменён"}
+
+
+def _my_match(db, user):
+    me = uid_of(user)
+    m = match_of(db, me)
+    if not m:
+        raise ApiError(404, "Активного матча нет")
+    return me, m, team_idx(m, me)
+
+
+@api()
+def api_match_cancel(request, db, user, body, outbox, ctx):
+    me, m, ti = _my_match(db, user)
+    if user["tg_id"] in ADMIN_IDS:
+        end_match(db, m, "cancelled", outbox, "Матч отменён администратором.")
+        return {"message": "Матч отменён"}
+    if m["teams"][ti]["captain"] != me:
+        raise ApiError(403, "Матч отменяют капитаны команд")
+    if ti not in m["cancel_votes"]:
+        m["cancel_votes"].append(ti)
+    if len(m["cancel_votes"]) >= 2:
+        end_match(db, m, "cancelled", outbox, "Матч отменён: капитаны обеих команд согласились.")
+        return {"message": "Матч отменён"}
+    other = db["users"].get(m["teams"][1 - ti]["captain"])
+    if other:
+        outbox.append((other["tg_id"], "Капитан соперников предлагает отменить матч. "
+                       "Откройте комнату и нажмите «Отменить матч», если согласны.", room_kb()))
+    return {"message": "Отмена запрошена, ждём капитана соперников"}
+
+
+@api()
+def api_match_report(request, db, user, body, outbox, ctx):
+    me, m, ti = _my_match(db, user)
+    if m["teams"][ti]["captain"] != me:
+        raise ApiError(403, "Результат отправляет капитан команды")
+    if not any(x["team"] == ti for x in m["shots"]):
+        raise ApiError(400, "Сначала прикрепите скриншот результата")
+    rep = m.get("report")
+    if rep and rep["team"] != ti:
+        raise ApiError(400, "Соперники уже отправили результат: подтвердите или оспорьте его")
+    w = body.get("winner")
+    if w not in ("me", "enemy"):
+        raise ApiError(400, "Укажите, кто победил")
+    m["report"] = {"team": ti, "winner": ti if w == "me" else 1 - ti,
+                   "score": clean_str(body.get("score"), 10, "Счёт"), "ts": int(time.time())}
+    other = db["users"].get(m["teams"][1 - ti]["captain"])
+    if other:
+        outbox.append((other["tg_id"], "Капитан соперников отправил результат матча. "
+                       "Откройте комнату, проверьте скриншот и подтвердите или оспорьте.", room_kb()))
+    return {"message": "Результат отправлен капитану соперников"}
+
+
+@api()
+def api_match_confirm(request, db, user, body, outbox, ctx):
+    me, m, ti = _my_match(db, user)
+    if m["teams"][ti]["captain"] != me:
+        raise ApiError(403, "Подтверждает капитан команды")
+    rep = m.get("report")
+    if not rep or rep["team"] == ti:
+        raise ApiError(400, "Нет результата от соперников для подтверждения")
+    if body.get("accept"):
+        end_match(db, m, "finished", outbox,
+                  f"Матч завершён: победила команда {rep['winner'] + 1}"
+                  + (f", счёт {rep['score']}" if rep["score"] else "") + ".", winner=rep["winner"])
+        return {"message": "Результат подтверждён"}
+    end_match(db, m, "disputed", outbox, "Результат оспорен. Скриншоты передали администратору, он примет решение.")
+    notify_admins_dispute(db, m, outbox)
+    return {"message": "Результат оспорен, решит администратор"}
+
+
+async def api_shot_upload(request):
+    data = await request.read()
+    if not data or len(data) > MAX_SHOT:
+        return web.json_response({"error": "Файл пустой или больше 5 МБ"}, status=400, headers=NOSTORE)
+    ext = ("png" if data[:8] == b"\x89PNG\r\n\x1a\n" else "jpg" if data[:3] == b"\xff\xd8\xff"
+           else "webp" if data[:4] == b"RIFF" and data[8:12] == b"WEBP" else None)
+    if not ext:
+        return web.json_response({"error": "Нужна картинка PNG, JPG или WEBP"}, status=400, headers=NOSTORE)
+    async with lock:
+        db = db_load()
+        user = session_user(db, request)
+        if user is None:
+            return web.json_response({"error": "Нужен вход через Telegram"}, status=401, headers=NOSTORE)
+        me = uid_of(user)
+        m = match_of(db, me)
+        if not m or m["id"] != request.match_info["mid"]:
+            return web.json_response({"error": "Активного матча нет"}, status=404, headers=NOSTORE)
+        ti = team_idx(m, me)
+        if m["teams"][ti]["captain"] != me:
+            return web.json_response({"error": "Скриншоты прикрепляет капитан"}, status=403, headers=NOSTORE)
+        if sum(1 for x in m["shots"] if x["team"] == ti) >= 5:
+            return web.json_response({"error": "Можно прикрепить не больше 5 скриншотов"}, status=400, headers=NOSTORE)
+        sid = secrets.token_hex(6)
+        SHOTS_DIR.mkdir(parents=True, exist_ok=True)
+        (SHOTS_DIR / f"{m['id']}_{sid}.{ext}").write_bytes(data)
+        m["shots"].append({"id": sid, "team": ti, "ext": ext, "ts": int(time.time())})
+        db_save(db)
+    return web.json_response({"ok": True}, headers=NOSTORE)
+
+
+async def api_shot_get(request):
+    async with lock:
+        db = db_load()
+        user = session_user(db, request)
+        m = db["matches"].get(request.match_info["mid"])
+    if user is None or not m:
+        return web.Response(status=404)
+    if team_idx(m, uid_of(user)) is None and user["tg_id"] not in ADMIN_IDS:
+        return web.Response(status=403)
+    sh = next((x for x in m["shots"] if x["id"] == request.match_info["sid"]), None)
+    path = SHOTS_DIR / f"{m['id']}_{sh['id']}.{sh['ext']}" if sh else None
+    if not path or not path.is_file():
+        return web.Response(status=404)
+    return web.FileResponse(path, headers={**NOSTORE, "X-Content-Type-Options": "nosniff"})
+
+
+def sniff_ext(b: bytes):
+    if b[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    if b[:3] == b"\xff\xd8\xff":
+        return "jpg"
+    if b[:4] == b"RIFF" and b[8:12] == b"WEBP":
+        return "webp"
+    return None
+
+
+def _drop_avatar_files(pid: str) -> None:
+    for f in AVATARS_DIR.glob(pid + ".*"):
+        try:
+            f.unlink()
+        except OSError:
+            pass
+
+
+async def api_avatar_upload(request):
+    data = await request.read()
+    ext = sniff_ext(data) if data and len(data) <= MAX_AVATAR else None
+    if not ext:
+        return web.json_response({"error": "Нужна картинка PNG, JPG или WEBP до 2 МБ"}, status=400, headers=NOSTORE)
+    async with lock:
+        db = db_load()
+        user = session_user(db, request)
+        if user is None:
+            return web.json_response({"error": "Нужен вход через Telegram"}, status=401, headers=NOSTORE)
+        AVATARS_DIR.mkdir(parents=True, exist_ok=True)
+        _drop_avatar_files(user["pid"])
+        (AVATARS_DIR / f"{user['pid']}.{ext}").write_bytes(data)
+        user["avatar"], user["avatar_ext"] = int(time.time()), ext
+        db_save(db)
+    return web.json_response({"ok": True, "av": user["avatar"]}, headers=NOSTORE)
+
+
+async def api_avatar_get(request):
+    pid = request.match_info["pid"]
+    async with lock:
+        u = user_by_pid(db_load(), pid)
+    if not u or not u.get("avatar"):
+        return web.Response(status=404)
+    path = AVATARS_DIR / f"{pid}.{u.get('avatar_ext', 'jpg')}"
+    if not path.is_file():
+        return web.Response(status=404)
+    return web.FileResponse(path, headers={"Cache-Control": "public, max-age=86400",
+                                           "X-Content-Type-Options": "nosniff"})
+
+
+@api()
+def api_avatar_delete(request, db, user, body, outbox, ctx):
+    _drop_avatar_files(user["pid"])
+    user.pop("avatar", None)
+    user.pop("avatar_ext", None)
+    return {"ok": True}
 
 
 # ---------- сайт ----------
@@ -813,6 +1291,12 @@ async def debug(_):
 async def api_top(_):
     async with lock:
         rows = ranked(load())
+        db = db_load()
+    by_pid = {u["pid"]: u for u in db["users"].values()}
+    for r in rows:  # аватарка в топе: только если админ привязал ник командой /link
+        u = by_pid.get(r.get("pid"))
+        r["pid"] = u["pid"] if u else ""
+        r["av"] = u.get("avatar", 0) if u else 0
     return web.json_response(rows, headers=NOSTORE)
 
 
@@ -848,7 +1332,18 @@ async def main():
         web.post("/api/party/leave", api_party_leave),
         web.post("/api/party/kick", api_party_kick),
         web.post("/api/pinvites/{id}/{act:accept|decline|cancel}", api_pinvite_resolve),
+        web.post("/api/queue/start", api_queue_start),
+        web.post("/api/queue/cancel", api_queue_cancel),
+        web.post("/api/match/cancel", api_match_cancel),
+        web.post("/api/match/report", api_match_report),
+        web.post("/api/match/confirm", api_match_confirm),
+        web.get("/api/shot/{mid:[0-9a-f]+}/{sid:[0-9a-f]+}", api_shot_get),
+        web.get("/api/avatar/{pid:[0-9a-f]+}", api_avatar_get),
+        web.post("/api/avatar/delete", api_avatar_delete),
     ])
+    up = web.Application(client_max_size=MAX_SHOT + 4096)  # загрузка скриншотов, лимит только здесь
+    up.add_routes([web.post("/avatar", api_avatar_upload), web.post("/{mid:[0-9a-f]+}", api_shot_upload)])
+    app.add_subapp("/api/shots", up)
     runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", PORT).start()

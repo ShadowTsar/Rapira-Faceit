@@ -75,6 +75,30 @@ dialog::backdrop{background:rgba(0,0,0,.6)}
 .slot.plus:hover,.slot.plus:focus-visible{border-color:var(--o1);outline:none}
 .slot.free{border-style:dashed;color:var(--muted)}
 a.lnk{color:var(--text);text-decoration:none;font-weight:700}a.lnk:hover{color:var(--o1)}
+.av{display:inline-flex;align-items:center;justify-content:center;border-radius:12px;overflow:hidden;background:linear-gradient(#ff9a1f,#ff5a00);color:#111;font-weight:800;flex:none;border:2px solid var(--line);vertical-align:middle}
+.av img{width:100%;height:100%;object-fit:cover;display:block}
+.av.fill{width:100%;aspect-ratio:1/1;font-size:clamp(20px,7vw,34px);border-radius:16px}
+.who{display:flex;align-items:center;gap:8px;min-width:0}
+.pty-h{display:flex;justify-content:space-between;align-items:baseline;margin:6px 2px 12px;letter-spacing:.12em;font-weight:800;font-size:14px;color:var(--muted)}
+.pty-h b{color:var(--text)}
+.pty{display:grid;grid-template-columns:repeat(var(--n,5),minmax(0,1fr));gap:8px;margin:0 0 14px;padding-top:8px}
+.pm{display:flex;flex-direction:column;align-items:center;gap:6px;text-align:center;min-width:0;background:none;border:0;color:var(--text);font-family:inherit;padding:0}
+.pa{position:relative;width:100%}
+.pa>a{display:block}
+.pa .av{border-color:#2fd16b}
+.pm.me .pa .av{border-color:var(--o1)}
+.lead{position:absolute;top:-9px;left:50%;transform:translateX(-50%);background:linear-gradient(#ff9a1f,#ff5a00);color:#111;font-size:10px;font-weight:800;padding:2px 7px;border-radius:10px;letter-spacing:.05em;white-space:nowrap;z-index:1}
+.pm .pn{font-weight:700;font-size:13px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pm .pi{font-size:11px;color:var(--muted);max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pm .plus{width:100%;aspect-ratio:1/1;display:flex;align-items:center;justify-content:center;border:2px dashed var(--line);border-radius:16px;font-size:28px;font-weight:800;color:var(--muted)}
+button.pm{cursor:pointer}
+button.pm:hover .plus,button.pm:focus-visible .plus{border-color:var(--o1);color:var(--o1)}
+.pm.wait .av{opacity:.45;border-style:dashed}
+.kick{position:absolute;top:-6px;right:-6px;width:22px;height:22px;border-radius:50%;border:1px solid var(--bad);background:#241214;color:var(--bad);font-size:12px;line-height:1;padding:0;cursor:pointer;z-index:2}
+.btn.big{display:block;width:100%;padding:15px;font-size:17px;border-radius:14px;margin:4px 0 18px}
+.mrow{display:flex;align-items:center;gap:10px;padding:8px 0;border-top:1px solid var(--line)}
+.mrow .mi{flex:1;min-width:0}
+.mrow .gid{color:var(--muted);font-size:13px}
 [hidden]{display:none!important}
 @media(max-width:520px){.form .two,.filters{grid-template-columns:1fr}}
 @media(prefers-reduced-motion:no-preference){#toast{animation:pop .2s}@keyframes pop{from{opacity:0;transform:translate(-50%,8px)}}}
@@ -103,7 +127,7 @@ a.lnk{color:var(--text);text-decoration:none;font-weight:700}a.lnk:hover{color:v
   </section>
 
   <section id="t-find" hidden>
-    <p class="sub">Выберите режим и соберите пати: нажмите «+», чтобы позвать друга.</p>
+    <p class="sub">Выберите режим, позовите друзей через «+» и нажмите «Найти игру».</p>
     <div id="fl"></div>
   </section>
 
@@ -185,7 +209,7 @@ function renderTop(){
   if(!list.length){var r=document.createElement("tr");var td=cell(r,players.length?"Ничего не найдено.":"Таблица пока пуста.");td.colSpan=6;tb.appendChild(r);return}
   list.forEach(function(p){
     var tr=document.createElement("tr");if(p.rank<=3)tr.className="p"+p.rank;
-    cell(tr,p.rank,"rk");cell(tr,p.nick,"nm");
+    cell(tr,p.rank,"rk");var nt=cell(tr,"","nm");nt.appendChild(h("span",{class:"who"},av(p,30),h("span",{text:p.nick})));
     var l=cell(tr,"");var s=document.createElement("span");s.className="lvl";s.textContent=p.level;l.appendChild(s);
     cell(tr,p.elo,"elo");cell(tr,Number(p.kd).toFixed(2));cell(tr,p.win+"%");
     tb.appendChild(tr)});
@@ -195,6 +219,36 @@ document.querySelectorAll("th").forEach(function(th){th.addEventListener("click"
   var k=th.dataset.k;if(sk===k){dir=-dir}else{sk=k;dir=(k==="nick"||k==="rank")?1:-1}renderTop()})});
 q.addEventListener("input",renderTop);
 setInterval(function(){if(!$("#t-top").hidden)loadData()},30000);
+
+/* ---------- аватарки ---------- */
+function av(u,sz,cls){
+  var d=h("span",{class:"av"+(cls?" "+cls:"")});
+  if(sz)d.style.cssText="width:"+sz+"px;height:"+sz+"px;font-size:"+Math.round(sz*.42)+"px";
+  var letter=((u&&u.nick)||"?").trim().charAt(0).toUpperCase();
+  if(u&&u.av&&u.pid){
+    var img=h("img",{src:"/api/avatar/"+u.pid+"?v="+u.av,alt:"",loading:"lazy"});
+    img.addEventListener("error",function(){img.remove();d.textContent=letter});
+    d.appendChild(img)}
+  else d.textContent=letter;
+  return d}
+function resizeAvatar(f){
+  return new Promise(function(res,rej){
+    var url=URL.createObjectURL(f),img=new Image();
+    img.onload=function(){var s=Math.min(img.width,img.height),c=document.createElement("canvas");c.width=c.height=256;
+      c.getContext("2d").drawImage(img,(img.width-s)/2,(img.height-s)/2,s,s,0,0,256,256);URL.revokeObjectURL(url);
+      c.toBlob(function(b){b?res(b):rej(new Error("Не удалось обработать фото"))},"image/jpeg",.85)};
+    img.onerror=function(){URL.revokeObjectURL(url);rej(new Error("Не удалось открыть изображение"))};
+    img.src=url})}
+function avatarBlock(u){
+  var fi=h("input",{type:"file",accept:"image/*",hidden:true,"aria-label":"Фото профиля"});
+  fi.addEventListener("change",function(){var f=fi.files[0];if(!f)return;
+    resizeAvatar(f).then(function(b){return fetch("/api/shots/avatar",{method:"POST",headers:{Authorization:"Bearer "+TOKEN,"Content-Type":"image/jpeg"},body:b})})
+      .then(function(r){return r.json().catch(function(){return{}}).then(function(d){if(!r.ok)throw new Error(d.error||"Ошибка "+r.status)})})
+      .then(function(){toast("Фото обновлено");loadMe().then(route)}).catch(function(e){toast(e.message,true)})});
+  return h("div",{class:"who",style:"margin:8px 0 12px;gap:14px"},av(u,84),
+    h("div",{},h("div",{class:"row",style:"margin-top:0"},h("button",{class:"btn sm",type:"button",text:"Загрузить фото",onclick:function(){fi.click()}}),
+      u.av?h("button",{class:"btn danger sm",type:"button",text:"Удалить",onclick:function(){act("/api/avatar/delete",{},"Фото удалено")}}):null),
+      h("p",{class:"muted",style:"margin:6px 0 0",text:"Фото обрежется до квадрата. Его увидят в друзьях, пати и матчах."}),fi))}
 
 /* ---------- общие кусочки ---------- */
 function tgLink(u){return u&&/^\w{3,}$/.test(u)?h("a",{href:"https://t.me/"+u,target:"_blank",rel:"noopener",text:"@"+u}):null}
@@ -213,7 +267,7 @@ function showProfile(pid){
   call("/api/users/"+encodeURIComponent(pid)).then(function(u){
     var d=h("dialog");d.addEventListener("close",function(){d.remove()});
     function run(path,body){call(path,body).then(function(r){toast(r.message||"Готово");d.close();route()}).catch(function(e){toast(e.message,true)})}
-    d.appendChild(h("h3",{text:u.nick}));
+    d.appendChild(h("div",{class:"who",style:"gap:12px;margin-bottom:6px"},av(u,64),h("h3",{text:u.nick})));
     d.appendChild(h("div",{class:"meta",text:"ID в игре: "+(u.game_id||"не указан")}));
     if(u.about)d.appendChild(h("p",{class:"meta",text:u.about}));
     d.appendChild(h("div",{class:"meta",text:"Друзей: "+u.friends_count}));
@@ -229,49 +283,131 @@ function showProfile(pid){
     d.appendChild(row);document.body.appendChild(d);d.showModal()}).catch(function(e){toast(e.message,true)})}
 function needLogin(box,text){box.appendChild(h("div",{class:"card"},h("p",{class:"muted",text:text}),h("a",{class:"btn",href:"#me",text:"Войти"})))}
 
-/* ---------- подбор: пати 3x3 / 4x4 / 5x5 ---------- */
+/* ---------- подбор: пати, поиск игры, комната матча ---------- */
 var MODES=[[3,"3×3"],[4,"4×4"],[5,"5×5"]];
-var LOBBY={size:5},FR=0;
-function renderFind(){
-  var box=$("#fl"),rid=++FR;clear(box);
+var LOBBY={size:5},FR=0,POLL=null,BUSY=false,SHOTC={};
+function schedulePoll(){clearTimeout(POLL);POLL=setTimeout(function(){
+  if(CUR!=="find")return;
+  if(BUSY||document.querySelector("dialog[open]")){schedulePoll();return}
+  renderFind(true)},4000)}
+function renderFind(silent){
+  var box=$("#fl"),rid=++FR;clearTimeout(POLL);if(!silent)clear(box);
   loadMe().then(function(){
     if(rid!==FR)return;
-    if(!S.me.user){needLogin(box,"Войдите, чтобы собрать пати.");return}
+    if(!S.me.user){clear(box);needLogin(box,"Войдите, чтобы собрать пати и найти игру.");return}
     return Promise.all([call("/api/party"),call("/api/friends")]).then(function(r){
-      if(rid===FR)drawFind(box,S.me.user,r[0],r[1].friends)})
+      if(rid!==FR)return;
+      clear(box);drawFind(box,S.me.user,r[0],r[1].friends);
+      if(r[0].match||r[0].queue)schedulePoll()})
   }).catch(function(e){toast(e.message,true)})}
+function fmtEl(s){var m=Math.floor(s/60);return m+":"+("0"+(s%60)).slice(-2)}
+function lastText(l){return "Последний матч: "+(l.status==="finished"?(l.result==="win"?"победа 🏆":"поражение"):l.status==="cancelled"?"отменён":"результат оспорен, решит администратор")}
 function drawFind(box,u,pd,friends){
+  if(pd.match)return drawMatch(box,u,pd.match);
+  if(pd.queue)return drawSearching(box,pd);
   var p=pd.party,size=p?p.size:LOBBY.size,leader=!p||p.leader;
   pd.invites.forEach(function(i){
     box.appendChild(h("div",{class:"card"},h("b",{text:i.from.nick+" зовёт вас в пати "+i.size+"×"+i.size+" ("+i.count+"/"+i.size+")"}),
       h("div",{class:"row"},h("button",{class:"btn sm",text:"Принять",onclick:function(){act("/api/pinvites/"+i.id+"/accept",{})}}),
         h("button",{class:"btn ghost sm",text:"Отклонить",onclick:function(){act("/api/pinvites/"+i.id+"/decline",{})}}))))});
+  if(pd.last)box.appendChild(h("div",{class:"card"},h("span",{class:"meta",text:lastText(pd.last)})));
   box.appendChild(h("div",{class:"seg"},MODES.map(function(m){return h("button",{class:"btn"+(size===m[0]?"":" ghost"),text:m[1],disabled:!leader,onclick:function(){
     if(p)act("/api/party/size",{size:m[0]});else{LOBBY.size=m[0];renderFind()}}})})));
-  var slots=h("div",{class:"slots"}),members=p?p.members:[{pid:u.pid,nick:u.nick,leader:true}],invited=p?p.invited:[];
+  var members=p?p.members:[{pid:u.pid,nick:u.nick,av:u.av||0,game_id:u.game_id||"",leader:true}],invited=p?p.invited:[];
+  if(leader)box.appendChild(h("button",{class:"btn big",text:"🔍 Найти игру "+size+"×"+size,onclick:function(){act("/api/queue/start",{size:size})}}));
+  else box.appendChild(h("p",{class:"muted",text:"Поиск запускает лидер пати"}));
+  box.appendChild(h("div",{class:"pty-h"},h("span",{text:"ПАТИ"}),h("span",{},h("b",{text:members.length}),"/"+size)));
+  var slots=h("div",{class:"pty",style:"--n:"+size});
   members.forEach(function(m){var self=m.pid===u.pid;
-    slots.appendChild(h("div",{class:"slot"+(self?" me":"")},self?h("b",{text:m.nick}):nickLink(m),
-      h("span",{class:"muted",text:self?"Вы"+(m.leader?" · лидер":""):(m.leader?"лидер":"")}),
-      p&&leader&&!self?h("button",{class:"btn danger sm",text:"Исключить",onclick:function(){act("/api/party/kick",{pid:m.pid},"Игрок исключён")}}):null))});
-  invited.forEach(function(i){slots.appendChild(h("div",{class:"slot free"},nickLink(i.user),h("span",{text:"ждёт ответа"}),
-    leader?h("button",{class:"btn ghost sm",text:"Отменить",onclick:function(){act("/api/pinvites/"+i.id+"/cancel",{})}}):null))});
+    slots.appendChild(h("div",{class:"pm"+(self?" me":"")},
+      h("div",{class:"pa"},h("a",{href:"#","aria-label":"Профиль "+m.nick,onclick:function(e){e.preventDefault();showProfile(m.pid)}},av(m,0,"fill")),
+        m.leader?h("span",{class:"lead",text:"LEADER"}):null,
+        p&&leader&&!self?h("button",{class:"kick",type:"button","aria-label":"Исключить "+m.nick,text:"✕",onclick:function(){act("/api/party/kick",{pid:m.pid},"Игрок исключён")}}):null),
+      h("span",{class:"pn",text:self?m.nick+" (вы)":m.nick}),
+      m.game_id?h("span",{class:"pi",text:"#"+m.game_id}):null))});
+  invited.forEach(function(i){slots.appendChild(h("div",{class:"pm wait"},h("div",{class:"pa"},av(i.user,0,"fill")),h("span",{class:"pn",text:i.user.nick}),
+    leader?h("button",{class:"btn ghost sm",type:"button",text:"Отменить",onclick:function(){act("/api/pinvites/"+i.id+"/cancel",{})}}):h("span",{class:"pi",text:"ждёт ответа"})))});
   for(var k=members.length+invited.length;k<size;k++)
-    slots.appendChild(leader?h("button",{class:"slot plus",text:"+","aria-label":"Позвать друга",onclick:function(){pickFriend(friends,size)}}):h("div",{class:"slot free",text:"Свободно"}));
+    slots.appendChild(leader?h("button",{class:"pm",type:"button","aria-label":"Позвать друга",onclick:function(){pickFriend(friends,size)}},h("span",{class:"plus",text:"+"}),h("span",{class:"pi",text:"Позвать"})):h("div",{class:"pm"},h("span",{class:"plus"}),h("span",{class:"pi",text:"Свободно"})));
   box.appendChild(slots);
-  if(p)box.appendChild(h("div",{class:"row"},h("button",{class:"btn danger sm",text:"Выйти из пати",onclick:function(){act("/api/party/leave",{},"Вы вышли из пати")}})))}
+  if(p)box.appendChild(h("div",{class:"row"},h("button",{class:"btn danger sm",text:"Выйти из пати",onclick:function(){act("/api/party/leave",{},"Вы вышли из пати")}})));
+  box.appendChild(h("p",{class:"meta",text:"Не хватает игроков? Система найдёт остальных. Друзья из вашей пати всегда окажутся в одной команде."}))}
+function drawSearching(box,pd){
+  var q=pd.queue,p=pd.party;
+  var c=h("div",{class:"card"},h("h2",{text:"🔍 Ищем игру "+q.size+"×"+q.size}),
+    h("p",{class:"meta",text:"В поиске: "+q.waiting+" из "+q.need+" игроков · ищем уже "+fmtEl(q.elapsed)}),
+    h("p",{class:"meta",text:"Когда игроков хватит, откроется комната со всеми участниками матча."}));
+  if(p)c.appendChild(h("div",{class:"chips"},p.members.map(function(m){return h("span",{class:"chip who"},av(m,20),m.nick)})));
+  c.appendChild(h("div",{class:"row"},q.can_cancel?h("button",{class:"btn danger",text:"Отменить поиск",onclick:function(){act("/api/queue/cancel",{},"Поиск отменён")}}):h("span",{class:"muted",text:"Поиск отменяет лидер пати"})));
+  box.appendChild(c)}
+function shotImg(mid,sid){
+  var img=h("img",{alt:"Скриншот",style:"max-width:100%;border-radius:8px;border:1px solid var(--line)"}),k=mid+sid;
+  if(SHOTC[k]){img.src=SHOTC[k];return img}
+  fetch("/api/shot/"+mid+"/"+sid,{headers:{Authorization:"Bearer "+TOKEN}}).then(function(r){return r.ok?r.blob():Promise.reject()})
+    .then(function(b){SHOTC[k]=URL.createObjectURL(b);img.src=SHOTC[k]}).catch(function(){img.alt="Не удалось загрузить скриншот"});
+  return img}
+function drawMatch(box,u,m){
+  var cap=m.captain,mine=m.shots.filter(function(s){return s.team===m.team}).length,rep=m.report;
+  box.appendChild(h("div",{class:"card"},h("h2",{text:"Матч "+m.size+"×"+m.size+" найден"}),
+    h("p",{class:"meta",text:"Вы в команде "+(m.team+1)+". Добавьте друг друга по ID в игре и соберите лобби. Капитан (👑) выбран случайно."})));
+  var teams=h("div",{class:"filters"});
+  m.teams.forEach(function(t,i){
+    var c=h("div",{class:"card"},h("h3",{text:"Команда "+(i+1)+(i===m.team?" (ваша)":"")}));
+    t.members.forEach(function(p){
+      c.appendChild(h("div",{class:"mrow"},av(p,46),
+        h("div",{class:"mi"},p.me?h("b",{text:p.nick+" (вы)"+(p.captain?" 👑":"")}):h("div",{},nickLink(p),p.captain?" 👑":""),
+          h("div",{class:"gid",text:p.game_id?"ID: "+p.game_id:"ID не указан"}),
+          p.tg?h("div",{class:"gid"},"Telegram: ",tgLink(p.tg)):null),
+        p.game_id?h("button",{class:"btn ghost sm",text:"Копировать",onclick:function(){copyText(p.game_id).then(function(){toast("ID скопирован")}).catch(function(){})}}):null))});
+    teams.appendChild(c)});
+  box.appendChild(teams);
+  var res=h("div",{class:"card"},h("h3",{text:"Результат матча"}));
+  if(m.shots.length){m.shots.forEach(function(s){res.appendChild(h("div",{class:"meta",text:"Скриншот · команда "+(s.team+1)}));res.appendChild(shotImg(m.id,s.id))})}
+  else res.appendChild(h("p",{class:"muted",text:"Скриншотов пока нет. После игры капитан прикрепляет скриншот результата."}));
+  if(rep&&rep.team!==m.team){
+    res.appendChild(h("p",{class:"meta",text:"Капитан соперников сообщил: победила команда "+(rep.winner+1)+(rep.score?", счёт "+rep.score:"")+"."}));
+    if(cap)res.appendChild(h("div",{class:"row"},h("button",{class:"btn",text:"Подтвердить",onclick:function(){act("/api/match/confirm",{accept:true})}}),
+      h("button",{class:"btn danger",text:"Оспорить",onclick:function(){if(confirm("Оспорить результат? Скриншоты уйдут администратору."))act("/api/match/confirm",{accept:false})}})));
+    else res.appendChild(h("p",{class:"muted",text:"Подтверждает или оспаривает капитан вашей команды."}))}
+  else if(rep)res.appendChild(h("p",{class:"meta",text:"Результат отправлен: победила команда "+(rep.winner+1)+(rep.score?", счёт "+rep.score:"")+". Ждём подтверждения капитана соперников."}));
+  if(cap&&!(rep&&rep.team!==m.team)){
+    var inp=h("input",{type:"file",accept:"image/png,image/jpeg,image/webp","aria-label":"Скриншот результата"});
+    inp.addEventListener("change",function(){var f=inp.files[0];if(!f)return;
+      if(f.size>5*1024*1024){toast("Файл больше 5 МБ",true);return}
+      BUSY=true;
+      fetch("/api/shots/"+m.id,{method:"POST",headers:{Authorization:"Bearer "+TOKEN,"Content-Type":f.type||"application/octet-stream"},body:f})
+        .then(function(r){return r.json().catch(function(){return{}}).then(function(d){if(!r.ok)throw new Error(d.error||"Ошибка "+r.status);return d})})
+        .then(function(){BUSY=false;toast("Скриншот прикреплён");renderFind()})
+        .catch(function(e){BUSY=false;toast(e.message,true)})});
+    var win=h("select",{"aria-label":"Кто победил"},h("option",{value:"me",text:"Мы победили"}),h("option",{value:"enemy",text:"Победили соперники"}));
+    var sc=h("input",{maxlength:10,placeholder:"Счёт, например 13:9","aria-label":"Счёт"});
+    res.appendChild(h("div",{class:"form"},h("label",{},h("span",{text:"Прикрепить скриншот (PNG, JPG, WEBP до 5 МБ)"}),inp),
+      h("div",{class:"two"},win,sc),
+      h("div",{class:"row"},h("button",{class:"btn",text:"Отправить результат",disabled:!mine,onclick:function(){act("/api/match/report",{winner:win.value,score:sc.value})}}),
+        mine?null:h("span",{class:"muted",text:"Сначала прикрепите скриншот"}))))}
+  box.appendChild(res);
+  var cc=h("div",{class:"card"},h("h3",{text:"Отмена матча"}));
+  if(m.cancel_votes.length)cc.appendChild(h("p",{class:"meta",text:"Отмену запросил капитан команды "+(m.cancel_votes[0]+1)+"."}));
+  else cc.appendChild(h("p",{class:"meta",text:"Матч отменяется, когда оба капитана нажмут «Отменить матч»."}));
+  if(cap&&m.cancel_votes.indexOf(m.team)<0)cc.appendChild(h("div",{class:"row"},h("button",{class:"btn danger",text:"Отменить матч",onclick:function(){if(confirm("Отменить матч?"))act("/api/match/cancel",{})}})));
+  else if(cap)cc.appendChild(h("p",{class:"muted",text:"Вы уже запросили отмену, ждём капитана соперников."}));
+  else cc.appendChild(h("p",{class:"muted",text:"Отменить матч могут капитаны команд."}));
+  box.appendChild(cc)}
+(function(){var fl=$("#fl");fl.addEventListener("focusin",function(e){if(e.target.matches&&e.target.matches("input,select,textarea"))BUSY=true});
+  fl.addEventListener("focusout",function(){BUSY=false})})();
 function pickFriend(friends,size){
   var d=h("dialog");d.addEventListener("close",function(){d.remove()});
   d.appendChild(h("h3",{text:"Позвать друга в пати"}));
   var free=friends.filter(function(f){return !f.in_party&&!f.invited});
   if(!free.length)d.appendChild(h("p",{class:"muted",text:friends.length?"Все друзья сейчас в пати или уже приглашены.":"Друзей пока нет."}));
-  free.forEach(function(f){d.appendChild(h("div",{class:"mem"},h("span",{class:"nm",text:f.nick}),
+  free.forEach(function(f){d.appendChild(h("div",{class:"mem"},h("span",{class:"nm"},h("span",{class:"who"},av(f,32),f.nick)),
     h("button",{class:"btn sm",text:"Пригласить",onclick:function(){d.close();act("/api/party/invite",{pid:f.pid,size:size},"Приглашение отправлено")}})))});
   d.appendChild(h("div",{class:"row"},h("a",{class:"btn ghost sm",href:"#friends",text:"Найти друзей",onclick:function(){d.close()}}),
     h("button",{class:"btn ghost sm",text:"Закрыть",onclick:function(){d.close()}})));
   document.body.appendChild(d);d.showModal()}
 
 /* ---------- друзья ---------- */
-function personRow(u,btns){return h("div",{class:"mem"},h("span",{class:"nm"},nickLink(u)),u.game_id?h("span",{class:"muted",text:"ID: "+u.game_id}):null,btns)}
+function personRow(u,btns){return h("div",{class:"mem"},h("span",{class:"nm"},h("span",{class:"who"},av(u,38),nickLink(u))),u.game_id?h("span",{class:"muted",text:"ID: "+u.game_id}):null,btns)}
 function renderFriends(){
   var box=$("#t-friends");clear(box);
   loadMe().then(function(){
@@ -331,7 +467,7 @@ function loginCard(){
     h("p",{class:"muted",text:"Профиль создаётся автоматически и привязывается к вашему Telegram. Бот будет присылать заявки в друзья и приглашения в пати. Пароли не нужны."}),btn,st)}
 function accountCard(u){
   return h("div",{class:"card"},h("h2",{text:"Аккаунт"}),
-    idRow(u.game_id),
+    avatarBlock(u),idRow(u.game_id),
     h("div",{class:"meta"},"Telegram: ",tgLink(u.tg)||"привязан (username скрыт)",h("span",{class:"ok",text:" ✓ привязан"})),
     h("div",{class:"row"},h("button",{class:"btn ghost sm",text:"Выйти",onclick:function(){
       call("/api/logout",{}).catch(function(){}).then(function(){setToken(null);S.me=null;renderNav();route()})}})))}
