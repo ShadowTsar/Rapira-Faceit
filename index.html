@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Rapira Faceit — Топ и подбор</title>
+<style>
+:root{--panel:#161618;--line:#2a2a2d;--text:#f3f3f3;--muted:#9a9a9f;--o1:#ff9a1f;--o2:#ff5a00;--row:#1b1b1e;--ok:#4cc56f;--bad:#ff5a5a;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:repeating-linear-gradient(135deg,#111 0 14px,#0b0b0c 14px 28px);color:var(--text);font-family:"Segoe UI",Roboto,Arial,sans-serif;min-height:100vh}
+.wrap{max-width:900px;margin:0 auto;padding:20px 14px 60px}
+h1{margin:0;font-style:italic;font-weight:900;font-size:clamp(34px,9vw,64px);line-height:.95}
+h1 .a{background:linear-gradient(#ffb23a,#ff5a00);-webkit-background-clip:text;background-clip:text;color:transparent;display:block}
+h1 .b{color:#fff;display:block;text-shadow:0 3px 0 #000}
+h2{margin:0 0 10px;font-size:19px}h3{margin:0 0 10px;font-size:16px}
+.sub{color:var(--muted);margin:12px 0 14px}.muted{color:var(--muted)}
+.top{display:flex;justify-content:space-between;align-items:flex-end;gap:12px;flex-wrap:wrap}
+nav{display:flex;gap:6px;margin:14px 0;flex-wrap:wrap}
+nav a{color:var(--muted);text-decoration:none;padding:8px 14px;border:1px solid var(--line);border-radius:8px;background:var(--panel);font-weight:600}
+nav a.on{color:#111;background:linear-gradient(#ff9a1f,#ff5a00);border-color:transparent}
+nav a:focus-visible,.btn:focus-visible{outline:2px solid var(--o1);outline-offset:2px}
+input,select,textarea{width:100%;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:10px 12px;font-size:15px;font-family:inherit}
+input[type=checkbox]{width:auto;accent-color:var(--o2)}
+textarea{resize:vertical}
+input:focus,select:focus,textarea:focus{outline:2px solid var(--o1)}
+#q{margin-bottom:12px}
+.box{background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--o2);border-radius:10px;overflow-x:auto}
+table{width:100%;border-collapse:collapse;min-width:460px}
+th,td{padding:11px 12px;text-align:left;white-space:nowrap}
+th{color:var(--muted);font-weight:600;font-size:13px;border-bottom:1px solid var(--line);cursor:pointer;user-select:none}
+th:hover{color:var(--o1)}
+tbody tr:nth-child(odd){background:var(--row)}
+td.rk{font-weight:800;width:52px;color:var(--muted)}
+tr.p1 td.rk{color:#ffc247}tr.p2 td.rk{color:#d6d6d6}tr.p3 td.rk{color:#d98a4b}
+td.nm{font-weight:700}td.elo{font-weight:800;color:var(--o1)}
+.lvl{display:inline-block;min-width:26px;text-align:center;padding:2px 7px;border-radius:6px;background:linear-gradient(#ff9a1f,#ff5a00);color:#111;font-weight:800;font-size:13px}
+.lvl.none{background:var(--line);color:var(--muted)}
+.card{background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--o2);border-radius:10px;padding:14px;margin-bottom:12px}
+.item .hd{display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:6px}
+.item .hd b{font-size:17px}
+.meta{color:var(--muted);font-size:14px;margin:4px 0}
+.chips{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}
+.chip{padding:2px 9px;border-radius:20px;border:1px solid var(--line);font-size:13px;background:var(--row)}
+.chip.hit{border-color:var(--o1);color:var(--o1)}
+.fit{font-weight:800;font-size:13px;padding:3px 9px;border-radius:6px;background:var(--row);border:1px solid var(--line);white-space:nowrap}
+.fit.hi{color:var(--ok);border-color:var(--ok)}.fit.mid{color:var(--o1);border-color:var(--o1)}
+.btn{display:inline-block;background:linear-gradient(#ff9a1f,#ff5a00);color:#111;border:0;border-radius:8px;padding:9px 16px;font-weight:800;font-size:14px;cursor:pointer;text-decoration:none;font-family:inherit}
+.btn:disabled{opacity:.5;cursor:default}
+.btn.ghost{background:var(--row);color:var(--text);border:1px solid var(--line);font-weight:600}
+.btn.danger{background:none;color:var(--bad);border:1px solid var(--bad);font-weight:600}
+.btn.sm{padding:5px 10px;font-size:13px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px}
+.seg{display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap}
+.seg button{flex:1;min-width:110px}
+.filters{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px}
+.form{display:grid;gap:10px}
+.form label{display:grid;gap:4px;font-size:14px;color:var(--muted)}
+.form .two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.form .inl{display:flex;align-items:center;gap:8px;color:var(--text)}
+.roles{display:flex;gap:6px;flex-wrap:wrap}
+.roles label{display:flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:20px;padding:4px 10px;background:var(--row);color:var(--text)}
+.mem{display:flex;align-items:center;gap:8px;padding:8px 0;border-top:1px solid var(--line);flex-wrap:wrap}
+.mem .nm{font-weight:700;flex:1;min-width:120px}
+.mem a{color:var(--o1)}
+.empty{color:var(--muted);padding:18px;text-align:center}
+.ok{color:var(--ok)}
+#toast{position:fixed;left:50%;bottom:calc(20px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);background:#222;border:1px solid var(--line);border-left:4px solid var(--ok);padding:10px 16px;border-radius:8px;z-index:50;max-width:92vw}
+#toast.err{border-left-color:var(--bad)}
+dialog{background:var(--panel);color:var(--text);border:1px solid var(--line);border-top:4px solid var(--o2);border-radius:10px;width:min(420px,92vw)}
+dialog::backdrop{background:rgba(0,0,0,.6)}
+.slots{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px}
+.slot{display:flex;flex-direction:column;justify-content:center;align-items:center;gap:6px;min-height:96px;padding:10px;background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--o2);border-radius:10px;color:var(--text);font-family:inherit}
+.slot.me{border-color:var(--o1)}
+.slot.plus{border:2px dashed var(--line);font-size:34px;font-weight:800;color:var(--o1);cursor:pointer}
+.slot.plus:hover,.slot.plus:focus-visible{border-color:var(--o1);outline:none}
+.slot.free{border-style:dashed;color:var(--muted)}
+a.lnk{color:var(--text);text-decoration:none;font-weight:700}a.lnk:hover{color:var(--o1)}
+[hidden]{display:none!important}
+@media(max-width:520px){.form .two,.filters{grid-template-columns:1fr}}
+@media(prefers-reduced-motion:no-preference){#toast{animation:pop .2s}@keyframes pop{from{opacity:0;transform:translate(-50%,8px)}}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <h1><span class="a">RAPIRA</span><span class="b">FACEIT</span></h1>
+  </div>
+  <p id="boot" class="sub">Загрузка…</p>
+  <nav>
+    <a href="#top" id="n-top">Топ</a>
+    <a href="#find" id="n-find">Подбор</a>
+    <a href="#friends" id="n-friends">Друзья</a>
+    <a href="#me" id="n-me">Войти</a>
+  </nav>
+
+  <section id="t-top">
+    <p class="sub">Топ игроков FACEIT — рейтинг по ELO</p>
+    <input id="q" type="search" placeholder="Поиск по нику" aria-label="Поиск по нику">
+    <div class="box"><table>
+      <thead><tr><th data-k="rank">#</th><th data-k="nick">Игрок</th><th data-k="level">Уровень</th><th data-k="elo">ELO</th><th data-k="kd">K/D</th><th data-k="win">Победы</th></tr></thead>
+      <tbody id="tb"></tbody>
+    </table></div>
+  </section>
+
+  <section id="t-find" hidden>
+    <p class="sub">Выберите режим и соберите пати: нажмите «+», чтобы позвать друга.</p>
+    <div id="fl"></div>
+  </section>
+
+  <section id="t-friends" hidden></section>
+
+  <section id="t-me" hidden></section>
+</div>
+<div id="toast" hidden></div>
+<script>
+(function(){var last="";function show(m){if(m===last)return;last=m;var f=document.getElementById("fatal");if(!f)return;f.hidden=false;f.textContent+=m+"\n"}
+  window.addEventListener("error",function(e){if(!e.lineno&&!e.filename&&/^Script error/i.test(e.message||""))return;show("Ошибка: "+(e.message||e)+(e.lineno?" (строка "+e.lineno+")":""))});
+  window.addEventListener("unhandledrejection",function(e){var r=e.reason;if(!r)return;show("Ошибка: "+(r.message||r))})})();
+</script>
+<noscript><p style="padding:20px;color:#fff">Включите JavaScript, чтобы сайт работал.</p></noscript>
+<pre id="fatal" hidden style="position:fixed;left:8px;right:8px;bottom:8px;max-height:45vh;overflow:auto;margin:0;padding:10px;background:#300;color:#fff;border:1px solid #f55;border-radius:8px;font-size:12px;white-space:pre-wrap;z-index:100"></pre>
+
+<script>
+$=function(s){return document.querySelector(s)};
+function h(t,a){var e=document.createElement(t);a=a||{};
+  for(var k in a){var v=a[k];
+    if(k==="class")e.className=v;else if(k==="text")e.textContent=v;else if(k==="value")e.value=v;
+    else if(k.slice(0,2)==="on")e.addEventListener(k.slice(2),v);
+    else if(v!==false&&v!=null)e.setAttribute(k,v===true?"":v)}
+  for(var i=2;i<arguments.length;i++){var c=arguments[i];if(c==null||c===false)continue;
+    if(Array.isArray(c))c.forEach(function(x){if(x)e.appendChild(x)});
+    else e.appendChild(typeof c==="object"?c:document.createTextNode(c))}
+  return e}
+function clear(el){el.textContent=""}
+
+/* ---------- состояние и API ---------- */
+var TOKEN=null;try{TOKEN=localStorage.getItem("rf_token")}catch(e){}
+var S={me:null,cfg:{roles:[],team_max:5,bot:""},mode:"teams"};
+function setToken(t){TOKEN=t;try{t?localStorage.setItem("rf_token",t):localStorage.removeItem("rf_token")}catch(e){}}
+function call(path,body){
+  var o={headers:{},cache:"no-store"};
+  if(TOKEN)o.headers.Authorization="Bearer "+TOKEN;
+  if(body!==undefined){o.method="POST";o.headers["Content-Type"]="application/json";o.body=JSON.stringify(body)}
+  return fetch(path,o).then(function(r){return r.json().catch(function(){return{}}).then(function(d){
+    if(r.status===401&&TOKEN){setToken(null);S.me=null;renderNav()}
+    if(!r.ok)throw new Error(d.error||"Ошибка "+r.status);return d})})}
+var tt;function toast(msg,err){var t=$("#toast");t.textContent=msg;t.className=err?"err":"";t.hidden=false;clearTimeout(tt);tt=setTimeout(function(){t.hidden=true},3500)}
+function act(path,body,ok){return call(path,body).then(function(d){var m=(d&&d.message)||ok;if(m)toast(m);return loadMe().then(function(){route();return d})}).catch(function(e){toast(e.message,true)})}
+function loadMe(){return call("/api/me").then(function(d){S.me=d;S.cfg=d.cfg;renderNav()})}
+function renderNav(){var u=S.me&&S.me.user,b=(S.me&&S.me.badges)||{};
+  $("#n-me").textContent=u?u.nick:"Войти";
+  $("#n-find").textContent="Подбор"+(b.party?" ("+b.party+")":"");
+  $("#n-friends").textContent="Друзья"+(b.friends?" ("+b.friends+")":"")}
+function ask(title,ph){return new Promise(function(res){
+  var ta=h("textarea",{maxlength:200,rows:3,placeholder:ph});var d=h("dialog");
+  function done(v){d.close();d.remove();res(v)}
+  d.appendChild(h("h3",{text:title}));d.appendChild(ta);
+  d.appendChild(h("div",{class:"row"},h("button",{class:"btn",text:"Отправить",onclick:function(){done(ta.value)}}),h("button",{class:"btn ghost",text:"Отмена",onclick:function(){done(null)}})));
+  d.addEventListener("cancel",function(){d.remove();res(null)});
+  document.body.appendChild(d);d.showModal();ta.focus()})}
+
+/* ---------- роутинг ---------- */
+var TABS=["top","find","friends","me"];
+var CUR=null;
+function route(){
+  var t=CUR||(location.hash||"#top").slice(1);if(t==="party")t="find";if(TABS.indexOf(t)<0)t="top";CUR=t;
+  TABS.forEach(function(n){$("#t-"+n).hidden=n!==t;$("#n-"+n).classList.toggle("on",n===t)});
+  var bt=$("#boot");if(bt)bt.hidden=true;window.scrollTo(0,0);
+  if(t==="top")loadData();else if(t==="find")renderFind();else if(t==="friends")renderFriends();else renderMe()}
+function go(t){CUR=t;try{history.replaceState(null,"","#"+t)}catch(e){}route()}
+window.addEventListener("hashchange",function(){CUR=null;route()});
+document.addEventListener("click",function(e){
+  var a=e.target.closest&&e.target.closest("a[href^='#']");if(!a)return;
+  var m=/^#(top|find|friends|me|party)$/.exec(a.getAttribute("href"));
+  if(m){e.preventDefault();go(m[1]==="party"?"find":m[1])}});
+
+/* ---------- топ ---------- */
+var players=[],sk="rank",dir=1,tb=$("#tb"),q=$("#q");
+function cell(tr,text,cls){var td=document.createElement("td");if(cls)td.className=cls;td.textContent=text;tr.appendChild(td);return td}
+function renderTop(){
+  var t=q.value.trim().toLowerCase();
+  var list=players.filter(function(p){return p.nick.toLowerCase().indexOf(t)>-1});
+  list.sort(function(a,b){var x=a[sk],y=b[sk];return(x>y?1:x<y?-1:0)*dir});
+  tb.textContent="";
+  if(!list.length){var r=document.createElement("tr");var td=cell(r,players.length?"Ничего не найдено.":"Таблица пока пуста.");td.colSpan=6;tb.appendChild(r);return}
+  list.forEach(function(p){
+    var tr=document.createElement("tr");if(p.rank<=3)tr.className="p"+p.rank;
+    cell(tr,p.rank,"rk");cell(tr,p.nick,"nm");
+    var l=cell(tr,"");var s=document.createElement("span");s.className="lvl";s.textContent=p.level;l.appendChild(s);
+    cell(tr,p.elo,"elo");cell(tr,Number(p.kd).toFixed(2));cell(tr,p.win+"%");
+    tb.appendChild(tr)});
+}
+function loadData(){fetch("/api/top",{cache:"no-store"}).then(function(r){return r.json()}).then(function(d){players=d;renderTop()}).catch(function(){})}
+document.querySelectorAll("th").forEach(function(th){th.addEventListener("click",function(){
+  var k=th.dataset.k;if(sk===k){dir=-dir}else{sk=k;dir=(k==="nick"||k==="rank")?1:-1}renderTop()})});
+q.addEventListener("input",renderTop);
+setInterval(function(){if(!$("#t-top").hidden)loadData()},30000);
+
+/* ---------- общие кусочки ---------- */
+function tgLink(u){return u&&/^\w{3,}$/.test(u)?h("a",{href:"https://t.me/"+u,target:"_blank",rel:"noopener",text:"@"+u}):null}
+function copyText(t){
+  function fb(){return new Promise(function(res,rej){var a=document.createElement("textarea");a.value=t;a.style.cssText="position:fixed;opacity:0";document.body.appendChild(a);a.select();
+    var ok=false;try{ok=document.execCommand("copy")}catch(e){}a.remove();ok?res():rej()})}
+  try{if(navigator.clipboard&&navigator.clipboard.writeText)return navigator.clipboard.writeText(t).catch(fb)}catch(e){}
+  return fb()}
+function idRow(gid){
+  if(!gid)return h("div",{class:"meta"},"ID в игре не указан. ",h("a",{href:"#me",text:"Добавить в профиле"}));
+  return h("div",{class:"meta"},"Ваш ID в игре: ",h("b",{text:gid})," ",
+    h("button",{class:"btn ghost sm",type:"button",text:"Копировать",onclick:function(){
+      copyText(gid).then(function(){toast("ID скопирован")}).catch(function(){toast("Не удалось скопировать, выделите ID вручную",true)})}}))}
+function nickLink(u){return h("a",{href:"#",class:"lnk",text:u.nick,onclick:function(e){e.preventDefault();showProfile(u.pid)}})}
+function showProfile(pid){
+  call("/api/users/"+encodeURIComponent(pid)).then(function(u){
+    var d=h("dialog");d.addEventListener("close",function(){d.remove()});
+    function run(path,body){call(path,body).then(function(r){toast(r.message||"Готово");d.close();route()}).catch(function(e){toast(e.message,true)})}
+    d.appendChild(h("h3",{text:u.nick}));
+    d.appendChild(h("div",{class:"meta",text:"ID в игре: "+(u.game_id||"не указан")}));
+    if(u.about)d.appendChild(h("p",{class:"meta",text:u.about}));
+    d.appendChild(h("div",{class:"meta",text:"Друзей: "+u.friends_count}));
+    var tl=tgLink(u.tg);
+    d.appendChild(h("div",{class:"meta"},"Telegram: ",tl||(u.relation==="friend"||u.relation==="self"?"username скрыт":"виден только друзьям")));
+    var row=h("div",{class:"row"}),r=u.relation;
+    if(r==="none")row.appendChild(h("button",{class:"btn sm",text:"Добавить в друзья",onclick:function(){run("/api/friends/add",{pid:u.pid})}}));
+    if(r==="outgoing")row.appendChild(h("button",{class:"btn ghost sm",text:"Отозвать заявку",onclick:function(){run("/api/freqs/"+u.req_id+"/cancel",{})}}));
+    if(r==="incoming"){row.appendChild(h("button",{class:"btn sm",text:"Принять заявку",onclick:function(){run("/api/freqs/"+u.req_id+"/accept",{})}}));
+      row.appendChild(h("button",{class:"btn ghost sm",text:"Отклонить",onclick:function(){run("/api/freqs/"+u.req_id+"/decline",{})}}))}
+    if(r==="friend")row.appendChild(h("button",{class:"btn danger sm",text:"Удалить из друзей",onclick:function(){run("/api/friends/remove",{pid:u.pid})}}));
+    row.appendChild(h("button",{class:"btn ghost sm",text:"Закрыть",onclick:function(){d.close()}}));
+    d.appendChild(row);document.body.appendChild(d);d.showModal()}).catch(function(e){toast(e.message,true)})}
+function needLogin(box,text){box.appendChild(h("div",{class:"card"},h("p",{class:"muted",text:text}),h("a",{class:"btn",href:"#me",text:"Войти"})))}
+
+/* ---------- подбор: пати 3x3 / 4x4 / 5x5 ---------- */
+var MODES=[[3,"3×3"],[4,"4×4"],[5,"5×5"]];
+var LOBBY={size:5},FR=0;
+function renderFind(){
+  var box=$("#fl"),rid=++FR;clear(box);
+  loadMe().then(function(){
+    if(rid!==FR)return;
+    if(!S.me.user){needLogin(box,"Войдите, чтобы собрать пати.");return}
+    return Promise.all([call("/api/party"),call("/api/friends")]).then(function(r){
+      if(rid===FR)drawFind(box,S.me.user,r[0],r[1].friends)})
+  }).catch(function(e){toast(e.message,true)})}
+function drawFind(box,u,pd,friends){
+  var p=pd.party,size=p?p.size:LOBBY.size,leader=!p||p.leader;
+  pd.invites.forEach(function(i){
+    box.appendChild(h("div",{class:"card"},h("b",{text:i.from.nick+" зовёт вас в пати "+i.size+"×"+i.size+" ("+i.count+"/"+i.size+")"}),
+      h("div",{class:"row"},h("button",{class:"btn sm",text:"Принять",onclick:function(){act("/api/pinvites/"+i.id+"/accept",{})}}),
+        h("button",{class:"btn ghost sm",text:"Отклонить",onclick:function(){act("/api/pinvites/"+i.id+"/decline",{})}}))))});
+  box.appendChild(h("div",{class:"seg"},MODES.map(function(m){return h("button",{class:"btn"+(size===m[0]?"":" ghost"),text:m[1],disabled:!leader,onclick:function(){
+    if(p)act("/api/party/size",{size:m[0]});else{LOBBY.size=m[0];renderFind()}}})})));
+  var slots=h("div",{class:"slots"}),members=p?p.members:[{pid:u.pid,nick:u.nick,leader:true}],invited=p?p.invited:[];
+  members.forEach(function(m){var self=m.pid===u.pid;
+    slots.appendChild(h("div",{class:"slot"+(self?" me":"")},self?h("b",{text:m.nick}):nickLink(m),
+      h("span",{class:"muted",text:self?"Вы"+(m.leader?" · лидер":""):(m.leader?"лидер":"")}),
+      p&&leader&&!self?h("button",{class:"btn danger sm",text:"Исключить",onclick:function(){act("/api/party/kick",{pid:m.pid},"Игрок исключён")}}):null))});
+  invited.forEach(function(i){slots.appendChild(h("div",{class:"slot free"},nickLink(i.user),h("span",{text:"ждёт ответа"}),
+    leader?h("button",{class:"btn ghost sm",text:"Отменить",onclick:function(){act("/api/pinvites/"+i.id+"/cancel",{})}}):null))});
+  for(var k=members.length+invited.length;k<size;k++)
+    slots.appendChild(leader?h("button",{class:"slot plus",text:"+","aria-label":"Позвать друга",onclick:function(){pickFriend(friends,size)}}):h("div",{class:"slot free",text:"Свободно"}));
+  box.appendChild(slots);
+  if(p)box.appendChild(h("div",{class:"row"},h("button",{class:"btn danger sm",text:"Выйти из пати",onclick:function(){act("/api/party/leave",{},"Вы вышли из пати")}})))}
+function pickFriend(friends,size){
+  var d=h("dialog");d.addEventListener("close",function(){d.remove()});
+  d.appendChild(h("h3",{text:"Позвать друга в пати"}));
+  var free=friends.filter(function(f){return !f.in_party&&!f.invited});
+  if(!free.length)d.appendChild(h("p",{class:"muted",text:friends.length?"Все друзья сейчас в пати или уже приглашены.":"Друзей пока нет."}));
+  free.forEach(function(f){d.appendChild(h("div",{class:"mem"},h("span",{class:"nm",text:f.nick}),
+    h("button",{class:"btn sm",text:"Пригласить",onclick:function(){d.close();act("/api/party/invite",{pid:f.pid,size:size},"Приглашение отправлено")}})))});
+  d.appendChild(h("div",{class:"row"},h("a",{class:"btn ghost sm",href:"#friends",text:"Найти друзей",onclick:function(){d.close()}}),
+    h("button",{class:"btn ghost sm",text:"Закрыть",onclick:function(){d.close()}})));
+  document.body.appendChild(d);d.showModal()}
+
+/* ---------- друзья ---------- */
+function personRow(u,btns){return h("div",{class:"mem"},h("span",{class:"nm"},nickLink(u)),u.game_id?h("span",{class:"muted",text:"ID: "+u.game_id}):null,btns)}
+function renderFriends(){
+  var box=$("#t-friends");clear(box);
+  loadMe().then(function(){
+    if(!S.me.user){box.appendChild(loginCard());return}
+    return call("/api/friends").then(function(d){
+      if(d.incoming.length){var c=h("div",{class:"card"},h("h2",{text:"Заявки в друзья"}));
+        d.incoming.forEach(function(r){c.appendChild(personRow(r.user,[
+          h("button",{class:"btn sm",text:"Принять",onclick:function(){act("/api/freqs/"+r.id+"/accept",{})}}),
+          h("button",{class:"btn ghost sm",text:"Отклонить",onclick:function(){act("/api/freqs/"+r.id+"/decline",{})}})]))});box.appendChild(c)}
+      if(d.outgoing.length){var o=h("div",{class:"card"},h("h2",{text:"Отправленные заявки"}));
+        d.outgoing.forEach(function(r){o.appendChild(personRow(r.user,h("button",{class:"btn ghost sm",text:"Отозвать",onclick:function(){act("/api/freqs/"+r.id+"/cancel",{},"Заявка отозвана")}})))});box.appendChild(o)}
+      var l=h("div",{class:"card"},h("h2",{text:"Мои друзья"}));
+      if(!d.friends.length)l.appendChild(h("div",{class:"empty",text:"Друзей пока нет. Найдите игроков ниже."}));
+      d.friends.forEach(function(u){l.appendChild(personRow(u,[
+        h("button",{class:"btn ghost sm",text:"Профиль",onclick:function(){showProfile(u.pid)}}),
+        h("button",{class:"btn danger sm",text:"Удалить",onclick:function(){if(confirm("Удалить "+u.nick+" из друзей?"))act("/api/friends/remove",{pid:u.pid},"Удалён из друзей")}})]))});
+      box.appendChild(l);
+      var q=h("input",{type:"search",placeholder:"Ник, ID или Telegram (от 2 символов)","aria-label":"Найти игрока"}),res=h("div"),sid=0;
+      q.addEventListener("input",function(){var id=++sid,v=q.value.trim();clear(res);if(v.length<2)return;
+        call("/api/users?q="+encodeURIComponent(v)).then(function(rows){if(id!==sid)return;clear(res);
+          if(!rows.length){res.appendChild(h("div",{class:"empty",text:"Никого не найдено."}));return}
+          rows.forEach(function(u){var r=u.relation,b;
+            if(r==="friend")b=h("span",{class:"ok",text:"✓ друг"});
+            else if(r==="outgoing")b=h("span",{class:"muted",text:"заявка отправлена"});
+            else if(r==="incoming")b=h("button",{class:"btn sm",text:"Принять",onclick:function(){act("/api/freqs/"+u.req_id+"/accept",{})}});
+            else b=h("button",{class:"btn sm",text:"Добавить",onclick:function(){act("/api/friends/add",{pid:u.pid})}});
+            res.appendChild(personRow(u,b))})}).catch(function(){})});
+      box.appendChild(h("div",{class:"card"},h("h2",{text:"Добавить друга"}),idRow(S.me.user.game_id),h("p",{class:"muted",text:"Введите ник, ID в игре или Telegram друга. Точнее всего искать по ID."}),q,res))})
+  }).catch(function(e){box.appendChild(h("div",{class:"empty",text:e.message}))})}
+
+/* ---------- профиль ---------- */
+var me=$("#t-me");
+function renderMe(){
+  clear(me);
+  loadMe().then(function(){
+    var d=S.me;
+    if(!d.user){me.appendChild(loginCard());return}
+    me.appendChild(accountCard(d.user));
+    me.appendChild(profileCard(d.user));
+  }).catch(function(e){me.appendChild(h("div",{class:"empty",text:e.message}))})}
+function loginCard(){
+  var st=h("p",{class:"muted"});var btn=h("button",{class:"btn",text:"Войти через Telegram",onclick:function(){start()}});
+  function start(){btn.disabled=true;clear(st);
+    call("/api/auth/start",{}).then(function(d){
+      st.appendChild(document.createTextNode("Нажмите «Старт» и «Подтвердить вход» в боте, потом вернитесь сюда. "));
+      st.appendChild(h("a",{class:"btn sm",href:d.link,target:"_blank",rel:"noopener",text:"Открыть бота"}));
+      poll(d.code,0)}).catch(function(e){btn.disabled=false;st.textContent=e.message})}
+  function poll(code,n){
+    if(n>150){btn.disabled=false;st.textContent="Время вышло, попробуйте ещё раз.";return}
+    setTimeout(function(){
+      if(!document.body.contains(btn))return;
+      call("/api/auth/check?code="+encodeURIComponent(code)).then(function(d){
+        if(d.status==="ok"){setToken(d.token);toast("Вы вошли");route()}
+        else if(d.status==="expired"){btn.disabled=false;st.textContent="Ссылка устарела или вход отменён. Попробуйте ещё раз."}
+        else poll(code,n+1)}).catch(function(){poll(code,n+1)})},2000)}
+  return h("div",{class:"card"},h("h2",{text:"Вход через Telegram"}),
+    h("p",{class:"muted",text:"Профиль создаётся автоматически и привязывается к вашему Telegram. Бот будет присылать заявки в друзья и приглашения в пати. Пароли не нужны."}),btn,st)}
+function accountCard(u){
+  return h("div",{class:"card"},h("h2",{text:"Аккаунт"}),
+    idRow(u.game_id),
+    h("div",{class:"meta"},"Telegram: ",tgLink(u.tg)||"привязан (username скрыт)",h("span",{class:"ok",text:" ✓ привязан"})),
+    h("div",{class:"row"},h("button",{class:"btn ghost sm",text:"Выйти",onclick:function(){
+      call("/api/logout",{}).catch(function(){}).then(function(){setToken(null);S.me=null;renderNav();route()})}})))}
+function field(label,el){return h("label",{},h("span",{text:label}),el)}
+function profileCard(u){
+  var nick=h("input",{maxlength:32,required:true,value:u.nick}),gid=h("input",{maxlength:20,value:u.game_id||"",placeholder:"Только цифры",autocomplete:"off",inputmode:"numeric",pattern:"[0-9]*"}),
+    about=h("textarea",{maxlength:300,rows:3,placeholder:"Опыт, часы в игре, когда играете"},u.about);
+  var f=h("form",{class:"form"},field("Ник",nick),field("ID в игре",gid),h("p",{class:"muted",text:"Введите тот же ID, что и в игре: по нему вас найдут друзья. Только цифры."}),field("О себе",about),
+    h("div",{class:"row"},h("button",{class:"btn",type:"submit",text:"Сохранить"})));
+  gid.addEventListener("input",function(){gid.value=gid.value.replace(/\D/g,"")});
+  f.addEventListener("submit",function(e){e.preventDefault();
+    act("/api/profile",{nick:nick.value,game_id:gid.value,about:about.value},"Профиль сохранён")});
+  return h("div",{class:"card"},h("h2",{text:"Профиль"}),f)}
+
+/* ---------- демо-режим: включается сам, если сервера бота нет ---------- */
+function installDemo(){
+  var real=window.fetch,ME="7f3e9a10";
+  var U=[{pid:ME,nick:"Вы",about:"",tg:"demo_user"},
+    {pid:"a1b2c3d4",nick:"Nova",about:"Хороший коммуникатор.",tg:"nova_tg",game_id:"50123456"},
+    {pid:"b2c3d4e5",nick:"Kenny",about:"Играю по вечерам.",tg:"kenny_tg",game_id:"50234567"},
+    {pid:"c3d4e5f6",nick:"Zed",about:"Играю 4 года.",tg:"zed_tg",game_id:"50345678"},
+    {pid:"d4e5f6a7",nick:"Pixel",about:"",tg:"pixel_tg",game_id:"50456789"},
+    {pid:"e5f6a718",nick:"Rex",about:"Новичок, быстро учусь.",tg:"rex_tg",game_id:"50567890"},
+    {pid:"f6a718b9",nick:"Echo",about:"",tg:"echo_tg",game_id:"50678901"}];
+  var TOP=[["Rapira",4210,1.45,63],["Zeus_",4100,1.4,61],["n0rth",3980,1.33,58],["Kenny",3850,1.29,57],["Vortex",3720,1.22,55],["Blaze",3600,1.18,54],["Mirage",3475,1.15,53],["Sova",3300,1.1,52],["Frost",3150,1.07,51],["Echo",3000,1.02,50]].map(function(a,i){
+    var L=[800,950,1100,1250,1400,1550,1700,1850,2000],l=10;for(var k=L.length-1;k>=0;k--)if(a[1]<=L[k])l=k+1;
+    return{nick:a[0],elo:a[1],kd:a[2],win:a[3],rank:i+1,level:l}});
+  var friends=["a1b2c3d4","b2c3d4e5"],freqs=[{id:"f1",from:"c3d4e5f6",to:ME}],seq=10;
+  var parties={pp1:{id:"pp1",owner:"d4e5f6a7",size:4,members:["d4e5f6a7","e5f6a718"]}},pinv=[{id:"i1",party:"pp1",to:ME}];
+  function usr(p){return U.filter(function(x){return x.pid===p})[0]}
+  function pb(u){return{pid:u.pid,nick:u.nick,game_id:u.game_id||"",about:u.about}}
+  function rel(p){if(p===ME)return["self",null];if(friends.indexOf(p)>-1)return["friend",null];
+    for(var i=0;i<freqs.length;i++){var r=freqs[i];if(r.from===ME&&r.to===p)return["outgoing",r.id];if(r.from===p&&r.to===ME)return["incoming",r.id]}return["none",null]}
+  function J(d,st){return new Response(JSON.stringify(d),{status:st||200,headers:{"Content-Type":"application/json"}})}
+  function E(m,st){return J({error:m},st||400)}
+  function myParty(){for(var k in parties)if(parties[k].members.indexOf(ME)>-1)return parties[k]}
+  function pending(pid){return pinv.filter(function(i){return i.party===pid})}
+  function refresh(){if(window.route&&!$("#t-find").hidden)route()}
+  function acceptFreq(r){freqs=freqs.filter(function(x){return x!==r});var o=r.from===ME?r.to:r.from;if(friends.indexOf(o)<0)friends.push(o)}
+  function view(p){return{id:p.id,size:p.size,leader:p.owner===ME,
+    members:p.members.map(function(m){return Object.assign(pb(usr(m)),{leader:m===p.owner})}),
+    invited:pending(p.id).map(function(i){return{id:i.id,user:pb(usr(i.to))}})}}
+  function api(url,b,au){var x;
+    if(url.indexOf("/api/top")===0)return J(TOP);
+    if(url.indexOf("/api/auth/start")===0)return J({code:"demo",link:"https://t.me/"});
+    if(url.indexOf("/api/auth/check")===0)return J({status:"ok",token:"demo"});
+    if(url.indexOf("/api/auth/webapp")===0)return J({token:"demo"});
+    if(url.indexOf("/api/logout")===0)return J({ok:true});
+    if(url.indexOf("/api/me")===0)return J(au?{user:Object.assign(pb(U[0]),{tg:U[0].tg}),cfg:{bot:"demo_bot"},
+      badges:{friends:freqs.filter(function(r){return r.to===ME}).length,party:pinv.filter(function(i){return i.to===ME}).length}}:{user:null,cfg:{bot:"demo_bot"}});
+    if(!au)return E("Нужен вход через Telegram",401);
+    if(url.indexOf("/api/profile")===0){U[0].nick=(b.nick||"").trim();if(U[0].nick.length<2){U[0].nick="Вы";return E("Ник: минимум 2 символа")}var g=(b.game_id||"").trim();
+      if(g){if(!/^[0-9]{3,20}$/.test(g))return E("ID в игре: только цифры, от 3 до 20");
+        if(U.some(function(x){return x.pid!==ME&&(x.game_id||"").toLowerCase()===g.toLowerCase()}))return E("Этот ID уже занят другим игроком")}
+      U[0].game_id=g;U[0].about=b.about||"";return J({ok:true})}
+    if(url.indexOf("/api/friends/add")===0){var t=usr(b.pid);if(!t||t.pid===ME)return E("Нельзя добавить этого игрока");var r=rel(t.pid);
+      if(r[0]==="friend")return E("Вы уже друзья");if(r[0]==="outgoing")return E("Заявка уже отправлена");
+      if(r[0]==="incoming"){acceptFreq(freqs.filter(function(f){return f.id===r[1]})[0]);return J({message:t.nick+" теперь в друзьях"})}
+      var f={id:"f"+seq++,from:ME,to:t.pid};freqs.push(f);
+      setTimeout(function(){if(freqs.indexOf(f)>-1){acceptFreq(f);if(window.route&&!$("#t-friends").hidden)route()}},2500);
+      return J({message:"Заявка отправлена (в демо друг примет через пару секунд)"})}
+    if(url.indexOf("/api/friends/remove")===0){friends=friends.filter(function(p){return p!==b.pid});return J({ok:true})}
+    if(url.indexOf("/api/friends")===0){var mp=myParty(),inv=mp?pending(mp.id).map(function(i){return i.to}):[];
+      return J({friends:friends.map(function(p){var u=usr(p),inp=false;for(var k in parties)if(parties[k].members.indexOf(p)>-1)inp=true;
+          return Object.assign(pb(u),{in_party:inp,invited:inv.indexOf(p)>-1})}),
+        incoming:freqs.filter(function(r){return r.to===ME}).map(function(r){return{id:r.id,user:pb(usr(r.from))}}),
+        outgoing:freqs.filter(function(r){return r.from===ME}).map(function(r){return{id:r.id,user:pb(usr(r.to))}})})}
+    if(x=url.match(/^\/api\/freqs\/(\w+)\/(\w+)/)){var fr=freqs.filter(function(f){return f.id===x[1]})[0];if(!fr)return E("Заявка уже обработана",404);
+      if(x[2]==="accept"){acceptFreq(fr);return J({message:"Теперь вы друзья"})}freqs=freqs.filter(function(f){return f!==fr});return J({message:x[2]==="cancel"?"Заявка отозвана":"Заявка отклонена"})}
+    if(url.indexOf("/api/users?")===0){var q=decodeURIComponent(url.split("q=")[1]||"").toLowerCase();if(q.length<2)return J([]);
+      return J(U.filter(function(u){return u.pid!==ME&&(u.nick.toLowerCase().indexOf(q)>-1||(u.game_id||"").toLowerCase()===q)}).map(function(u){var r=rel(u.pid);return Object.assign(pb(u),{relation:r[0],req_id:r[1]})}))}
+    if(x=url.match(/^\/api\/users\/(\w+)/)){var u=usr(x[1]);if(!u)return E("Игрок не найден",404);var r2=rel(u.pid);
+      var d=Object.assign(pb(u),{relation:r2[0],req_id:r2[1],friends_count:u.pid===ME?friends.length:3});if(r2[0]==="friend"||r2[0]==="self")d.tg=u.tg;return J(d)}
+    if(url.indexOf("/api/party/invite")===0){var tg=usr(b.pid);if(!tg||friends.indexOf(b.pid)<0)return E("Приглашать можно только друзей");
+      var p=myParty();if(p&&p.owner!==ME)return E("Приглашает только лидер пати");
+      var size=p?p.size:+b.size||5;if([3,4,5].indexOf(size)<0)return E("Режим: 3, 4 или 5");
+      if((p?p.members.length+pending(p.id).length:1)>=size)return E("Все места заняты или ждут ответа");
+      if(!p){p=parties["pm"]={id:"pm",owner:ME,size:size,members:[ME]}}
+      var iv={id:"i"+seq++,party:p.id,to:b.pid};pinv.push(iv);
+      setTimeout(function(){if(pinv.indexOf(iv)>-1&&parties[p.id]&&p.members.length<p.size){p.members.push(iv.to);pinv=pinv.filter(function(i){return i!==iv});refresh()}},2500);
+      return J({message:"Приглашение отправлено (в демо друг примет через пару секунд)"})}
+    if(url.indexOf("/api/party/size")===0){var ps=myParty();if(!ps||ps.owner!==ME)return E("Режим меняет лидер пати",403);var n=+b.size;
+      if([3,4,5].indexOf(n)<0)return E("Режим: 3, 4 или 5");if(n<ps.members.length+pending(ps.id).length)return E("Сначала исключите игроков или отмените приглашения");ps.size=n;return J({ok:true})}
+    if(url.indexOf("/api/party/leave")===0){var pl=myParty();if(!pl)return E("Вы не в пати");pl.members=pl.members.filter(function(m){return m!==ME});
+      if(!pl.members.length){delete parties[pl.id];pinv=pinv.filter(function(i){return i.party!==pl.id})}else if(pl.owner===ME)pl.owner=pl.members[0];return J({ok:true})}
+    if(url.indexOf("/api/party/kick")===0){var pk=myParty();if(!pk||pk.owner!==ME||b.pid===ME||pk.members.indexOf(b.pid)<0)return E("Нельзя исключить этого игрока");
+      pk.members=pk.members.filter(function(m){return m!==b.pid});return J({ok:true})}
+    if(url.indexOf("/api/party")===0){var pp=myParty();return J({party:pp?view(pp):null,invites:pinv.filter(function(i){return i.to===ME&&parties[i.party]}).map(function(i){var q=parties[i.party];return{id:i.id,size:q.size,count:q.members.length,from:pb(usr(q.owner))}})})}
+    if(x=url.match(/^\/api\/pinvites\/(\w+)\/(\w+)/)){var iv2=pinv.filter(function(i){return i.id===x[1]})[0];if(!iv2)return E("Приглашение уже недействительно",404);
+      if(x[2]!=="accept"){pinv=pinv.filter(function(i){return i!==iv2});return J({message:x[2]==="cancel"?"Приглашение отменено":"Приглашение отклонено"})}
+      if(myParty())return E("Вы уже в пати - сначала выйдите из неё");var tp=parties[iv2.party];if(tp.members.length>=tp.size)return E("В пати нет свободных мест");
+      tp.members.push(ME);pinv=pinv.filter(function(i){return i.to!==ME});return J({message:"Вы в пати "+usr(tp.owner).nick})}
+    return E("Не реализовано в демо",404)}
+  window.fetch=function(url,o){o=o||{};if(String(url).indexOf("/api/")!==0)return real.apply(window,arguments);
+    var b={};try{b=JSON.parse(o.body||"{}")}catch(e){}var au=/Bearer/.test((o.headers||{}).Authorization||"");
+    return new Promise(function(res){setTimeout(function(){res(api(String(url),b,au))},100)})};
+  var n=document.createElement("div");n.textContent="ДЕМО: сервер бота не найден, данные тестовые и не сохраняются";
+  n.style.cssText="position:fixed;top:0;left:0;right:0;background:#2a2a2d;color:#ff9a1f;font-size:12px;text-align:center;padding:4px;z-index:60";
+  document.body.appendChild(n);document.body.style.paddingTop="22px"}
+var READY=fetch("/health",{cache:"no-store"}).then(function(r){return r.text()}).then(function(t){if(t.trim()!=="ok")throw 0}).catch(installDemo);
+
+/* ---------- старт ---------- */
+var tw=window.Telegram&&window.Telegram.WebApp;
+if(tw&&tw.initData){try{tw.ready();tw.expand()}catch(e){}}
+READY.then(loadMe).then(function(){
+  if(!S.me.user&&tw&&tw.initData)
+    return call("/api/auth/webapp",{initData:tw.initData}).then(function(d){setToken(d.token);return loadMe()}).catch(function(){})
+}).then(route).catch(route);
+</script>
+</body>
+</html>
