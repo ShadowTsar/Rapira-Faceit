@@ -751,7 +751,7 @@ async def cmd_start(m: Message, command: CommandObject):
                  "/elo Ник 4210 [K/D] [победы] - добавить или изменить\n"
                  "/del Ник - удалить\n"
                  "/import - заменить весь список (строки: ник ELO K/D победы)\n"
-                 "/link Ник ID_в_игре - привязать аватарку игрока к нику в топе\n"
+                 "/stat ID_или_@ник ELO [K/D] [победы] - добавить игрока в топ вместе с профилем и аватаркой\n"
                  "/resetid ID_в_игре - сбросить ID игрока (если ошибся)\n"
                  "/ban ID_или_@ник [причина], /unban, /banlist - блокировки\n"
                  "/users - кто зарегистрирован (чтобы добавить в топ)\n"
@@ -933,7 +933,7 @@ async def cmd_admin(m: Message):
         "/match ID - подробности матча и скриншоты\n"
         "/winner ID 1|2 - решить спорный матч\n"
         "/cancelmatch ID - отменить матч\n"
-        "/link Ник ID_в_игре - привязать аватарку к нику в топе\n"
+        "/stat ID_или_@ник ELO [K/D] [победы] - добавить зарегистрированного игрока в топ с профилем\n"
         "/resetid ID_в_игре - сбросить ID игрока")
 
 
@@ -964,7 +964,7 @@ async def cmd_users(m: Message, command: CommandObject):
     for i, u in enumerate(users[(page - 1) * per:page * per], start=(page - 1) * per + 1):
         in_top = u["nick"].lower() in nicks or u["pid"] in pids
         lines.append(f"{i}. {u['nick']} | ID {u.get('game_id') or '-'} | {tg_tag(u)} | {'в топе' if in_top else 'не в топе'}")
-    lines.append("Добавить в топ: /elo Ник ELO [K/D] [победы%]. Метка «в топе» ставится, если такой ник есть в топе или он привязан через /link.")
+    lines.append("Добавить игрока в топ с профилем и аватаркой: /stat ID_в_игре ELO [K/D] [победы%]. Метка «в топе» ставится, если игрок есть в таблице.")
     await _send_long(m, lines)
 
 
@@ -1105,28 +1105,41 @@ async def cmd_cancelmatch(m: Message, command: CommandObject):
     await _admin_finish(m, command, True)
 
 
-@router.message(Command("link"))
-async def cmd_link(m: Message, command: CommandObject):
-    # привязка ника из топа к зарегистрированному игроку, чтобы в топе показывалась его аватарка
+@router.message(Command("stat"))
+async def cmd_stat(m: Message, command: CommandObject):
+    # импорт профиля в топ: берём зарегистрированного игрока и ставим его в таблицу вместе с аватаркой и профилем
     if not is_admin(m):
         return await m.answer("Нет доступа.")
     parts = (command.args or "").split()
-    if len(parts) != 2:
-        return await m.answer("Формат: /link Ник ID_в_игре  (отвязать: /link Ник off)")
+    try:
+        if len(parts) < 2:
+            raise ValueError
+        elo = int(parts[1])
+        kd = float(parts[2].replace(",", ".")) if len(parts) > 2 else None
+        win = int(parts[3]) if len(parts) > 3 else None
+    except ValueError:
+        return await m.answer("Формат: /stat ID_в_игре_или_@ник ELO [K/D] [победы]\n"
+                              "Пример: /stat 127566 4210 1.45 63\nСписок игроков: /users")
     async with lock:
-        data, db = load(), db_load()
-        p = next((x for x in data if x["nick"].lower() == parts[0].lower()), None)
-        if not p:
-            return await m.answer("Такого ника нет в топе.")
-        if parts[1].lower() == "off":
-            p.pop("pid", None)
-        else:
-            u = next((x for x in db["users"].values() if (x.get("game_id") or "") == parts[1]), None)
-            if not u:
-                return await m.answer("Игрок с таким ID в игре не зарегистрирован на сайте.")
-            p["pid"] = u["pid"]
+        db, data = db_load(), load()
+        u = find_user(db, parts[0])
+        if not u:
+            return await m.answer("Игрок не найден среди зарегистрированных. Список: /users")
+        p = (next((x for x in data if x.get("pid") == u["pid"]), None)
+             or next((x for x in data if x["nick"].lower() == u["nick"].lower()), None))
+        if p is None:
+            p = {"nick": u["nick"], "elo": elo, "kd": 1.0, "win": 50}
+            data.append(p)
+        p["pid"], p["nick"], p["elo"] = u["pid"], u["nick"], elo
+        if kd is not None:
+            p["kd"] = kd
+        if win is not None:
+            p["win"] = win
         save(data)
-    await m.answer("Готово.")
+        row = next((r for r in ranked(data) if r.get("pid") == u["pid"]), None)
+    await m.answer(f"{u['nick']} в топе: " + (f"место №{row['rank']}, " if row else "") +
+                   f"ELO {elo}, K/D {p['kd']}, победы {p['win']}%.\n"
+                   "Профиль, аватарка и статистика привязаны и видны на сайте.")
 
 
 @router.message(Command("resetid"))
@@ -1936,10 +1949,12 @@ async def api_top(_):
         rows = ranked(load())
         db = db_load()
     by_pid = {u["pid"]: u for u in db["users"].values()}
-    for r in rows:  # аватарка в топе: только если админ привязал ник командой /link
+    for r in rows:  # игроки, добавленные через /stat, показываются с актуальным ником и аватаркой
         u = by_pid.get(r.get("pid"))
         r["pid"] = u["pid"] if u else ""
         r["av"] = u.get("avatar", 0) if u else 0
+        if u:
+            r["nick"] = u["nick"]
     return web.json_response(rows, headers=NOSTORE)
 
 
