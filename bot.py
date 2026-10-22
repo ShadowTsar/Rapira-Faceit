@@ -397,6 +397,11 @@ def match_record(db, uid: str) -> dict:
     return {"games": games, "wins": wins}
 
 
+def id_state(u: dict) -> str:
+    """'ok' - ID подтверждён админом, 'pending' - на проверке, 'rejected' - отклонён, '' - не указан/не проверен."""
+    return u.get("id_status") or ""
+
+
 def find_user(db, key: str):
     """Игрок по ID в игре; если такого нет, по точному нику или Telegram-нику."""
     k = key.strip().lstrip("@")
@@ -721,7 +726,7 @@ async def flush(outbox: list) -> None:
                     else InlineKeyboardButton(text=t, callback_data=d) for t, d in kb]])
             data = await blob_get(photo) if photo else None
             if data:
-                await bot.send_photo(tg_id, BufferedInputFile(data, filename="screenshot.jpg"), caption=text)
+                await bot.send_photo(tg_id, BufferedInputFile(data, filename="screenshot.jpg"), caption=text, reply_markup=markup)
             else:
                 await bot.send_message(tg_id, text, reply_markup=markup)
         except Exception:
@@ -750,15 +755,14 @@ async def cmd_start(m: Message, command: CommandObject):
         text += ("\n\nКоманды админа:\n"
                  "/elo Ник 4210 [K/D] [победы] - добавить или изменить\n"
                  "/del Ник - удалить\n"
-                 "/import - заменить весь список (строки: ник ELO K/D победы)\n"
-                 "/stat ID_или_@ник ELO [K/D] [победы] - добавить игрока в топ вместе с профилем и аватаркой\n"
                  "/resetid ID_в_игре - сбросить ID игрока (если ошибся)\n"
                  "/ban ID_или_@ник [причина], /unban, /banlist - блокировки\n"
                  "/users - кто зарегистрирован (чтобы добавить в топ)\n"
                  "/stat ID_в_игре ELO [K/D] [победы] - начислить статистику (/stat ID +25 - прибавить ELO)\n"
                  "/matches - последние матчи, /match ID - подробности и скриншоты\n"
-                 "/winner ID 1|2 - назначить победителя\n"
-                 "/cancelmatch ID - отменить матч")
+                 "/winner ID CT|T - победила сторона (CT = Counter-Terrorist, T = Terrorist)\n"
+                 "/cancelmatch ID - отменить матч, даже уже засчитанный\n"
+                 "/ids - ID игроков на проверке, /verify ID - подтвердить ID вручную")
     kb = None
     if PUBLIC_URL.startswith("https://"):
         kb = InlineKeyboardMarkup(inline_keyboard=[[
@@ -871,34 +875,6 @@ async def cmd_del(m: Message, command: CommandObject):
     await m.answer(f"Удалён: {nick}")
 
 
-@router.message(Command("import"))
-async def cmd_import(m: Message, command: CommandObject):
-    if not is_admin(m):
-        return await m.answer("Нет доступа.")
-    lines = [l for l in (command.args or "").splitlines() if l.strip()]
-    if not lines:
-        return await m.answer("Пришлите так:\n/import\nRapira 4210 1.45 63\nPlayer2 4100 1.40 61")
-    data, bad = [], []
-    for l in lines:
-        try:
-            nick, elo, kd, win = parse_parts(l.replace(",", " ").split())
-            upsert(data, nick, elo, kd, win)
-        except (ValueError, IndexError):
-            bad.append(l)
-    if not data:
-        return await m.answer("Не удалось разобрать ни одной строки.")
-    async with lock:
-        old = {p["nick"].lower(): p["pid"] for p in load() if p.get("pid")}  # сохраняем привязки аватарок
-        for p in data:
-            if p["nick"].lower() in old:
-                p["pid"] = old[p["nick"].lower()]
-        save(data)
-    msg = f"Список заменён, игроков: {len(data)}"
-    if bad:
-        msg += f"\nПропущено строк: {len(bad)}"
-    await m.answer(msg)
-
-
 MSK = timezone(timedelta(hours=3))
 STATUS_RU = {"active": "идёт", "disputed": "спорный", "finished": "завершён", "cancelled": "отменён"}
 
@@ -928,12 +904,10 @@ async def cmd_admin(m: Message):
         "/stat ID_в_игре ELO [K/D] [победы] - начислить статистику игроку, он попадёт в топ с профилем\n"
         "/elo Ник ELO [K/D] [победы%] - добавить или обновить игрока в топе\n"
         "/del Ник - убрать из топа\n"
-        "/import - заменить весь топ списком\n"
         "/matches - последние матчи (/matches спор - только спорные)\n"
         "/match ID - подробности матча и скриншоты\n"
-        "/winner ID 1|2 - решить спорный матч\n"
-        "/cancelmatch ID - отменить матч\n"
-        "/stat ID_или_@ник ELO [K/D] [победы] - добавить зарегистрированного игрока в топ с профилем\n"
+        "/winner ID CT|T - засчитать победу стороны (CT = Counter-Terrorist, T = Terrorist), работает и для засчитанных\n"
+        "/cancelmatch ID - отменить матч, даже уже засчитанный\n"
         "/resetid ID_в_игре - сбросить ID игрока")
 
 
@@ -1067,79 +1041,82 @@ async def cmd_match(m: Message, command: CommandObject):
     if r:
         lines.append(f"Заявка капитана: победила команда {r.get('winner', 0) + 1}, счёт {r.get('score') or '-'}")
     lines.append(f"Скриншотов: {len(mt['shots'])}" + ("" if mt["shots"] else f" (удаляются через {KEEP_DAYS} дн. после матча)"))
+    if mt.get("sides"):
+        lines.append("Стороны: " + ", ".join(f"команда {i + 1} - {sd}" for i, sd in enumerate(mt["sides"])))
+    lines.append(f"Результат: /winner {mt['id']} CT|T, отменить: /cancelmatch {mt['id']}")
     lines.append("Начислить статистику игроку: /stat ID_в_игре ELO K/D победы")
     await _send_long(m, lines)
     await flush([(m.from_user.id, f"Скриншот: команда {sh['team'] + 1}", None, f"shot/{mt['id']}_{sh['id']}")
                  for sh in mt["shots"][:6]])
 
 
-async def _admin_finish(m: Message, command: CommandObject, cancel: bool):
-    if not is_admin(m):
-        return await m.answer("Нет доступа.")
-    parts = (command.args or "").split()
-    if not parts or (not cancel and (len(parts) < 2 or parts[1] not in ("1", "2"))):
-        return await m.answer("Формат: /cancelmatch ID  или  /winner ID 1|2")
-    outbox = []
-    async with lock:
-        db = db_load()
-        mt = db["matches"].get(parts[0])
-        if not mt or mt["status"] not in ("active", "disputed"):
-            return await m.answer("Такого матча нет или он уже закрыт.")
-        if cancel:
-            end_match(db, mt, "cancelled", outbox, "Матч отменён администратором.")
-        else:
-            w = int(parts[1]) - 1
-            end_match(db, mt, "finished", outbox, f"Администратор определил результат: победила команда {w + 1}.", winner=w)
-        db_save(db)
-    await m.answer("Готово.")
-    await flush(outbox)
+def _side_team(mt, token: str):
+    """CT/T (сторона в этом матче) или 1/2 (номер команды) -> индекс команды."""
+    t = token.upper()
+    if t in ("CT", "T") and mt.get("sides") and t in mt["sides"]:
+        return mt["sides"].index(t)
+    if t in ("1", "2"):
+        return int(t) - 1
+    return None
+
+
+def _team_label(mt, i: int) -> str:
+    sd = (mt.get("sides") or [None, None])[i]
+    return f"команда {i + 1}" + (f" ({sd} - {SIDE_NAME[sd]})" if sd else "")
 
 
 @router.message(Command("winner"))
 async def cmd_winner(m: Message, command: CommandObject):
-    await _admin_finish(m, command, False)
+    if not is_admin(m):
+        return await m.answer("Нет доступа.")
+    parts = (command.args or "").split()
+    if len(parts) < 2:
+        return await m.answer("Формат: /winner ID_матча CT или T\nCT - победила сторона Counter-Terrorist, "
+                              "T - сторона Terrorist (стороны видны в /match ID).\nМожно и по номеру: /winner ID 1 или 2.")
+    outbox = []
+    async with lock:
+        db = db_load()
+        mt = db["matches"].get(parts[0])
+        if not mt:
+            return await m.answer("Матч не найден. ID смотрите в /matches.")
+        w = _side_team(mt, parts[1])
+        if w is None:
+            return await m.answer("Победителя укажите так: CT, T (сторона в матче) или 1, 2 (номер команды).")
+        old = mt["status"], mt.get("winner")
+        end_match(db, mt, "finished", outbox, f"Администратор определил результат: победила {_team_label(mt, w)}.", winner=w)
+        db_save(db)
+    note = ""
+    if old[0] == "finished" and old[1] is not None and old[1] != w:
+        note = f" Раньше было засчитано: {_team_label(mt, old[1])}."
+    elif old[0] == "cancelled":
+        note = " Матч был отменён, теперь засчитан."
+    await m.answer(f"Матч {mt['id']}: победила {_team_label(mt, w)}.{note}")
+    await flush(outbox)
 
 
 @router.message(Command("cancelmatch"))
 async def cmd_cancelmatch(m: Message, command: CommandObject):
-    await _admin_finish(m, command, True)
-
-
-@router.message(Command("stat"))
-async def cmd_stat(m: Message, command: CommandObject):
-    # импорт профиля в топ: берём зарегистрированного игрока и ставим его в таблицу вместе с аватаркой и профилем
     if not is_admin(m):
         return await m.answer("Нет доступа.")
-    parts = (command.args or "").split()
-    try:
-        if len(parts) < 2:
-            raise ValueError
-        elo = int(parts[1])
-        kd = float(parts[2].replace(",", ".")) if len(parts) > 2 else None
-        win = int(parts[3]) if len(parts) > 3 else None
-    except ValueError:
-        return await m.answer("Формат: /stat ID_в_игре_или_@ник ELO [K/D] [победы]\n"
-                              "Пример: /stat 127566 4210 1.45 63\nСписок игроков: /users")
+    mid = (command.args or "").strip()
+    if not mid:
+        return await m.answer("Формат: /cancelmatch ID_матча (работает и для уже засчитанного матча)")
+    outbox = []
     async with lock:
-        db, data = db_load(), load()
-        u = find_user(db, parts[0])
-        if not u:
-            return await m.answer("Игрок не найден среди зарегистрированных. Список: /users")
-        p = (next((x for x in data if x.get("pid") == u["pid"]), None)
-             or next((x for x in data if x["nick"].lower() == u["nick"].lower()), None))
-        if p is None:
-            p = {"nick": u["nick"], "elo": elo, "kd": 1.0, "win": 50}
-            data.append(p)
-        p["pid"], p["nick"], p["elo"] = u["pid"], u["nick"], elo
-        if kd is not None:
-            p["kd"] = kd
-        if win is not None:
-            p["win"] = win
-        save(data)
-        row = next((r for r in ranked(data) if r.get("pid") == u["pid"]), None)
-    await m.answer(f"{u['nick']} в топе: " + (f"место №{row['rank']}, " if row else "") +
-                   f"ELO {elo}, K/D {p['kd']}, победы {p['win']}%.\n"
-                   "Профиль, аватарка и статистика привязаны и видны на сайте.")
+        db = db_load()
+        mt = db["matches"].get(mid)
+        if not mt:
+            return await m.answer("Матч не найден. ID смотрите в /matches.")
+        if mt["status"] == "cancelled":
+            return await m.answer("Этот матч уже отменён.")
+        was = mt["status"]
+        mt.pop("winner", None)
+        end_match(db, mt, "cancelled", outbox,
+                  "Матч отменён администратором, результат не засчитан." if was == "finished" else "Матч отменён администратором.")
+        db_save(db)
+    await m.answer(f"Матч {mt['id']} отменён." + (" Результат аннулирован: победа и игра убраны из профилей игроков. "
+                   "Если вы начисляли ELO через /stat, верните его вручную." if was == "finished" else ""))
+    await flush(outbox)
 
 
 @router.message(Command("resetid"))
@@ -1157,10 +1134,10 @@ async def cmd_resetid(m: Message, command: CommandObject):
             return await m.answer("Игрок с таким ID не найден.")
         if queue_of(db, uid_of(u)) or match_of(db, uid_of(u)):
             return await m.answer("Игрок сейчас в поиске или матче, попробуйте позже.")
-        u["game_id"] = ""
+        u["game_id"], u["id_status"], u["id_note"] = "", "", ""
         db_save(db)
     await m.answer(f"ID сброшен у {u['nick']}.")
-    await flush([(u["tg_id"], "Администратор сбросил ваш ID в игре. Укажите правильный ID на сайте, он вводится один раз.", None)])
+    await flush([(u["tg_id"], "Администратор сбросил ваш ID в игре. Укажите правильный ID в профиле и отправьте скриншот на проверку.", None)])
 
 
 @router.message(Command("queue"))
@@ -1228,6 +1205,8 @@ def api(auth: bool = True):
     def deco(fn):
         async def handler(request: web.Request):
             body = {}
+            if (request.content_length or 0) > 64 * 1024:  # JSON-запросы маленькие; большие тела только у загрузки картинок
+                return web.json_response({"error": "Слишком большой запрос"}, status=413, headers=NOSTORE)
             if request.method == "POST":
                 try:
                     body = await request.json()
@@ -1313,7 +1292,8 @@ def api_me(request, db, user, body, outbox, ctx):
         return {"user": None, "cfg": cfg}
     uid = uid_of(user)
     return {"user": {**pub(user), "tg": user.get("tg_username", ""), "admin": user["tg_id"] in ADMIN_IDS,
-                     "banned": bool(user.get("banned"))}, "cfg": cfg,
+                     "banned": bool(user.get("banned")), "id_status": id_state(user),
+                     "id_note": user.get("id_note", "")}, "cfg": cfg,
             "badges": {"friends": sum(1 for r in db["freqs"].values() if r["to"] == uid),
                        "party": sum(1 for i in db["pinvites"].values() if i["to"] == uid)}}
 
@@ -1322,19 +1302,7 @@ def api_me(request, db, user, body, outbox, ctx):
 def api_profile(request, db, user, body, outbox, ctx):
     user["nick"] = clean_str(body.get("nick"), 32, "Ник", 2)
     user["about"] = clean_str(body.get("about"), 300, "О себе")
-    gid = clean_str(body.get("game_id"), 20, "ID в игре")
-    cur = user.get("game_id", "")
-    if cur and gid in ("", cur):
-        gid = cur
-    elif cur:
-        raise ApiError(400, "ID в игре нельзя изменить. Если ошиблись, напишите администратору")
-    if gid:
-        if not re.fullmatch(r"[0-9]{3,20}", gid):
-            raise ApiError(400, "ID в игре: только цифры, от 3 до 20")
-        me = uid_of(user)
-        if any(k != me and (v.get("game_id") or "").lower() == gid.lower() for k, v in db["users"].items()):
-            raise ApiError(400, "Этот ID уже занят другим игроком")
-    user["game_id"] = gid
+    # ID в игре меняется только через проверку по скриншоту (/api/shots/idcheck)
     return {"ok": True}
 
 
@@ -1585,21 +1553,6 @@ def api_pinvite_resolve(request, db, user, body, outbox, ctx):
     return {"message": resolve_pinvite(db, iid, user, act == "accept", outbox)}
 
 
-# --- ID в игре: вводится один раз и навсегда ---
-@api()
-def api_game_id(request, db, user, body, outbox, ctx):
-    if user.get("game_id"):
-        raise ApiError(400, "ID уже указан и не меняется")
-    gid = clean_str(body.get("game_id"), 20, "ID в игре", 3)
-    if not re.fullmatch(r"[0-9]{3,20}", gid):
-        raise ApiError(400, "ID в игре: только цифры, от 3 до 20")
-    me = uid_of(user)
-    if any(k != me and (v.get("game_id") or "") == gid for k, v in db["users"].items()):
-        raise ApiError(400, "Этот ID уже занят другим игроком")
-    user["game_id"] = gid
-    return {"message": "ID сохранён"}
-
-
 # --- поиск игры и матч ---
 @api()
 def api_queue_start(request, db, user, body, outbox, ctx):
@@ -1626,9 +1579,11 @@ def api_queue_start(request, db, user, body, outbox, ctx):
             raise ApiError(403, ("Вы заблокированы администратором" if m == me else f"Игрок {bu.get('nick')} заблокирован")
                            + (f": {bu['ban_reason']}" if bu.get("ban_reason") else ""))
     for m in members:
-        if not db["users"].get(m, {}).get("game_id"):
-            raise ApiError(400, "Сначала укажите ID в игре" if m == me
-                           else f"У игрока {db['users'][m]['nick']} не указан ID в игре")
+        mu = db["users"].get(m, {})
+        if id_state(mu) != "ok":
+            who = "Вам" if m == me else f"Игроку {mu.get('nick')}"
+            raise ApiError(400, {"pending": f"{who}: ID на проверке у администратора, подождите подтверждения",
+                                 }.get(id_state(mu), f"{who} нужно указать ID в профиле и отправить скриншот на проверку"))
     tid = secrets.token_hex(4)
     db["queue"][tid] = {"id": tid, "owner": me, "party": pid, "members": members,
                         "size": size, "joined": time.time(), "seen": time.time()}
@@ -1721,15 +1676,6 @@ def api_match_chat_send(request, db, user, body, outbox, ctx):
     chat.append({"id": m["chat_seq"], "uid": me, "text": text, "ts": now})
     del chat[:-CHAT_MAX]
     return {"ok": True}
-
-
-def find_user(db, key: str):
-    key = key.strip().lstrip("@")
-    if not key:
-        return None
-    return next((u for u in db["users"].values()
-                 if key == (u.get("game_id") or "") or key.lower() == (u.get("tg_username") or "").lower()
-                 or key == u["pid"]), None)
 
 
 def apply_ban(db, u, banned: bool, reason: str, outbox) -> None:
@@ -1873,6 +1819,112 @@ def _drop_avatar_files(pid: str) -> None:
     blob_del(f"avatar/{pid}")
 
 
+async def api_idcheck_upload(request):
+    # игрок указывает ID и прикладывает скриншот игрового профиля; админы сверяют их вручную
+    data = await request.read()
+    ext = sniff_ext(data) if data and len(data) <= MAX_SHOT else None
+    if not ext:
+        return web.json_response({"error": "Нужна картинка PNG, JPG или WEBP до 5 МБ"}, status=400, headers=NOSTORE)
+    gid = request.query.get("id", "").strip()
+    if not re.fullmatch(r"[0-9]{3,20}", gid):
+        return web.json_response({"error": "ID в игре: только цифры, от 3 до 20"}, status=400, headers=NOSTORE)
+    outbox = []
+    async with lock:
+        db = db_load()
+        user = session_user(db, request)
+        if user is None:
+            return web.json_response({"error": "Нужен вход через Telegram"}, status=401, headers=NOSTORE)
+        st, cur, me = id_state(user), user.get("game_id", ""), uid_of(user)
+        err = ("ID уже подтверждён" if st == "ok" else "ID уже на проверке, дождитесь ответа администратора" if st == "pending"
+               else f"ID нельзя изменить: у вас указан {cur}" if cur and gid != cur
+               else "Этот ID уже занят другим игроком" if any(k != me and (v.get("game_id") or "") == gid
+                                                              for k, v in db["users"].items()) else "")
+        if err:
+            return web.json_response({"error": err}, status=400, headers=NOSTORE)
+        await blob_put(f"shot/idv_{user['pid']}", data)
+        user["game_id"], user["id_status"], user["id_note"], user["id_ext"] = gid, "pending", "", ext
+        db_save(db)
+        outbox.extend(idv_notify(user))
+    await flush(outbox)
+    return web.json_response({"ok": True}, headers=NOSTORE)
+
+
+def idv_notify(u) -> list:
+    kb = [("✅ ID совпадает", f"idv:ok:{u['pid']}"), ("❌ Не совпадает", f"idv:no:{u['pid']}")]
+    tg = f" (@{u['tg_username']})" if u.get("tg_username") else ""
+    text = (f"Проверка ID. Игрок {u['nick']}{tg} указал ID: {u['game_id']}\n"
+            "Сверьте ID на скриншоте с указанным и нажмите кнопку.")
+    return [(a, text, kb, f"shot/idv_{u['pid']}") for a in ADMIN_IDS]
+
+
+@router.callback_query(F.data.startswith("idv:"))
+async def cb_idv(c: CallbackQuery):
+    if c.from_user.id not in ADMIN_IDS:
+        return await c.answer("Только для администратора", show_alert=True)
+    _, act, pid = c.data.split(":", 2)
+    outbox, done = [], ""
+    async with lock:
+        db = db_load()
+        u = user_by_pid(db, pid)
+        if not u or id_state(u) != "pending":
+            await c.answer("Эта заявка уже обработана", show_alert=True)
+            done = "обработано"
+        elif act == "ok":
+            u["id_status"], u["id_note"] = "ok", ""
+            outbox.append((u["tg_id"], "ID в игре подтверждён ✅ Теперь можно искать игру.", None))
+            done = f"✅ Подтверждён: {u['nick']} (ID {u['game_id']})"
+            db_save(db)
+        else:
+            outbox.append((u["tg_id"], "Администратор отклонил ID: он не совпал со скриншотом. "
+                           "Укажите ID заново в профиле и приложите скриншот игрового профиля, где виден ID.", None))
+            u["game_id"], u["id_status"], u["id_note"] = "", "rejected", "ID не совпал со скриншотом"
+            done = f"❌ Отклонён: {u['nick']}"
+            db_save(db)
+    if done and done != "обработано":
+        try:
+            await c.message.edit_caption(caption=(c.message.caption or "") + "\n\n" + done, reply_markup=None)
+        except Exception:
+            pass
+        await c.answer("Готово")
+    await flush(outbox)
+
+
+@router.message(Command("ids"))
+async def cmd_ids(m: Message):
+    if not is_admin(m):
+        return await m.answer("Нет доступа.")
+    async with lock:
+        pend = [u for u in db_load()["users"].values() if id_state(u) == "pending"]
+    if not pend:
+        return await m.answer("Заявок на проверку ID нет.")
+    await m.answer(f"На проверке: {len(pend)}. Присылаю скриншоты с кнопками.")
+    out = []
+    for u in pend[:10]:
+        out.extend((m.from_user.id, t, k, ph) for _, t, k, ph in idv_notify(u))
+    await flush(out)
+
+
+@router.message(Command("verify"))
+async def cmd_verify(m: Message, command: CommandObject):
+    # подтвердить ID без скриншота (например, тем, кто указал ID до появления проверки)
+    if not is_admin(m):
+        return await m.answer("Нет доступа.")
+    key = (command.args or "").strip()
+    if not key:
+        return await m.answer("Формат: /verify ID_в_игре или @ник")
+    outbox = []
+    async with lock:
+        db = db_load()
+        u = find_user(db, key)
+        if not u or not u.get("game_id"):
+            return await m.answer("Игрок с указанным ID не найден.")
+        u["id_status"], u["id_note"] = "ok", ""
+        db_save(db)
+        outbox.append((u["tg_id"], "ID в игре подтверждён ✅ Теперь можно искать игру.", None))
+    await m.answer(f"ID подтверждён: {u['nick']} ({u['game_id']}).")
+    await flush(outbox)
+
+
 async def api_avatar_upload(request):
     data = await request.read()
     ext = sniff_ext(data) if data and len(data) <= MAX_AVATAR else None
@@ -1982,7 +2034,7 @@ async def main():
         logging.warning("ADMIN_IDS пуст: менять таблицу никто не сможет")
     if not BOT_USERNAME:
         BOT_USERNAME = (await bot.get_me()).username
-    app = web.Application(client_max_size=64 * 1024)
+    app = web.Application(client_max_size=MAX_SHOT + 64 * 1024)  # лимит корневого приложения действует и на загрузки
     app.add_routes([
         web.get("/", index), web.get("/api/top", api_top), web.get("/health", health), web.get("/debug", debug),
         web.post("/api/auth/start", api_auth_start),
@@ -2003,7 +2055,6 @@ async def main():
         web.post("/api/party/leave", api_party_leave),
         web.post("/api/party/kick", api_party_kick),
         web.post("/api/pinvites/{id}/{act:accept|decline|cancel}", api_pinvite_resolve),
-        web.post("/api/game_id", api_game_id),
         web.post("/api/queue/start", api_queue_start),
         web.post("/api/queue/cancel", api_queue_cancel),
         web.post("/api/match/cancel", api_match_cancel),
@@ -2020,7 +2071,7 @@ async def main():
         web.post("/api/avatar/delete", api_avatar_delete),
     ])
     up = web.Application(client_max_size=MAX_SHOT + 4096)  # загрузка скриншотов, лимит только здесь
-    up.add_routes([web.post("/avatar", api_avatar_upload), web.post("/{mid:[0-9a-f]+}", api_shot_upload)])
+    up.add_routes([web.post("/avatar", api_avatar_upload), web.post("/idcheck", api_idcheck_upload), web.post("/{mid:[0-9a-f]+}", api_shot_upload)])
     app.add_subapp("/api/shots", up)
     runner = web.AppRunner(app)
     await runner.setup()

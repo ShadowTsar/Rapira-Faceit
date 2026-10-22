@@ -277,8 +277,50 @@ function avatarBlock(u){
       h("p",{class:"muted",style:"margin:6px 0 0",text:"Нажмите на фото или кнопку и выберите снимок из галереи. Он обрежется до квадрата."})),fi)}
 var NEEDID=false;
 function startSearch(size){
-  if(S.me&&S.me.user&&S.me.user.game_id){act("/api/queue/start",{size:size});return}
-  NEEDID=true;toast("Сначала укажите ID в игре в профиле",true);go("me")}
+  var st=S.me&&S.me.user?S.me.user.id_status:"";
+  if(st==="ok"){act("/api/queue/start",{size:size});return}
+  if(st==="pending"){toast("ID на проверке у администратора, подождите подтверждения",true);return}
+  NEEDID=true;toast("Сначала подтвердите ID в профиле",true);go("me")}
+
+/* ---------- картинки: сжатие перед отправкой ---------- */
+function compressImage(f,maxSide,q){
+  return new Promise(function(res,rej){
+    var url=URL.createObjectURL(f),img=new Image();
+    img.onload=function(){
+      var k=Math.min(1,maxSide/Math.max(img.width,img.height)),w=Math.round(img.width*k),hh=Math.round(img.height*k);
+      var c=document.createElement("canvas");c.width=w;c.height=hh;var g=c.getContext("2d");
+      g.fillStyle="#fff";g.fillRect(0,0,w,hh);g.drawImage(img,0,0,w,hh);URL.revokeObjectURL(url);
+      c.toBlob(function(b){b?res(b):rej(new Error("Не удалось обработать фото"))},"image/jpeg",q)};
+    img.onerror=function(){URL.revokeObjectURL(url);rej(new Error("Не удалось открыть изображение. Выберите JPG или PNG"))};
+    img.src=url})}
+function prepShot(f){
+  return compressImage(f,1600,.85).then(function(b){return b.size>1.5*1024*1024?compressImage(f,1280,.7):b})}
+function uploadErr(r,d){return new Error(r.status===413?"Файл слишком большой. Выберите другой скриншот":(d.error||"Ошибка "+r.status))}
+function idCard(u){
+  var st=u.id_status||"",c=h("div",{class:"card"},h("h2",{text:"ID в игре"}));
+  if(st==="ok"){c.appendChild(idRow(u.game_id));c.appendChild(h("p",{class:"meta ok",text:"ID подтверждён администратором ✓. Он закреплён и не меняется."}));return c}
+  if(st==="pending"){c.appendChild(idRow(u.game_id));
+    c.appendChild(h("p",{class:"meta",text:"Отправлено на проверку администратору. Как только он сверит скриншот, откроется поиск игры, и придёт сообщение в Telegram."}));
+    c.appendChild(h("div",{class:"row"},h("button",{class:"btn ghost sm",type:"button",text:"Обновить статус",onclick:function(){loadMe().then(route)}})));return c}
+  if(st==="rejected"&&u.id_note)c.appendChild(h("p",{class:"meta bad",text:"Администратор отклонил ID: "+u.id_note+". Укажите ID заново."}));
+  var legacy=!!u.game_id;
+  var gid=h("input",{id:"gidf",maxlength:20,value:u.game_id||"",disabled:legacy,placeholder:"Только цифры",autocomplete:"off",inputmode:"numeric",pattern:"[0-9]*","aria-label":"ID в игре"});
+  gid.addEventListener("input",function(){gid.value=gid.value.replace(/\D/g,"")});
+  var fi=h("input",{type:"file",accept:"image/*","aria-label":"Скриншот игрового профиля"});
+  var btn=h("button",{class:"btn",type:"button",text:"Отправить на проверку"});
+  btn.addEventListener("click",function(){
+    var id=gid.value.trim(),f=fi.files[0];
+    if(id.length<3){toast("Введите ID: минимум 3 цифры",true);return}
+    if(!f){toast("Прикрепите скриншот игрового профиля, где виден ID",true);return}
+    if(!confirm("ID "+id+" нельзя будет изменить. Отправить на проверку?"))return;
+    btn.disabled=true;toast("Загружаю скриншот…");
+    prepShot(f).then(function(b){return fetch("/api/shots/idcheck?id="+encodeURIComponent(id),{method:"POST",headers:{Authorization:"Bearer "+TOKEN,"Content-Type":"image/jpeg"},body:b})})
+      .then(function(r){return r.json().catch(function(){return{}}).then(function(d){if(!r.ok)throw uploadErr(r,d)})})
+      .then(function(){NEEDID=false;toast("Отправлено администратору на проверку");loadMe().then(route)})
+      .catch(function(e){btn.disabled=false;toast(e.message,true)})});
+  c.appendChild(h("p",{class:"meta",text:"Введите ID из игры и приложите скриншот игрового профиля, где виден этот ID: администратор сверит их. ID вводится один раз и навсегда. Без подтверждения играть нельзя."}));
+  c.appendChild(h("div",{class:"form"},field("ID в игре",gid),field("Скриншот профиля из игры",fi),h("div",{class:"row"},btn)));
+  return c}
 
 /* ---------- общие кусочки ---------- */
 function tgLink(u){return u&&/^\w{3,}$/.test(u)?h("a",{href:"https://t.me/"+u,target:"_blank",rel:"noopener",text:"@"+u}):null}
@@ -377,8 +419,8 @@ function drawFind(box,u,pd,friends){
     if(p)act("/api/party/size",{size:m[0]});else{LOBBY.size=m[0];renderFind()}}})})));
   box.appendChild(h("p",{class:"meta",text:"Сейчас в поиске: "+MODES.map(function(m){return m[1]+" — "+((pd.modes||{})[m[0]]||0)}).join(" · ")}));
   var members=p?p.members:[{pid:u.pid,nick:u.nick,av:u.av||0,game_id:u.game_id||"",leader:true}],invited=p?p.invited:[];
-  if(!u.game_id)box.appendChild(h("div",{class:"card"},h("p",{class:"meta",text:"Чтобы искать игру, укажите ID в игре. Он вводится один раз и навсегда."}),
-    h("button",{class:"btn sm",type:"button",text:"Указать ID",onclick:function(){NEEDID=true;go("me")}})));
+  if(u.id_status!=="ok")box.appendChild(h("div",{class:"card"},h("p",{class:"meta",text:u.id_status==="pending"?"ID на проверке у администратора. Как только он подтвердит, можно искать игру.":"Чтобы искать игру, укажите ID и отправьте скриншот игрового профиля на проверку."}),
+    u.id_status==="pending"?null:h("button",{class:"btn sm",type:"button",text:"Подтвердить ID",onclick:function(){NEEDID=true;go("me")}})));
   if(leader)box.appendChild(h("button",{class:"btn big",text:"🔍 Найти игру "+size+"×"+size,onclick:function(){startSearch(size)}}));
   else box.appendChild(h("p",{class:"muted",text:"Поиск запускает лидер пати"}));
   box.appendChild(h("div",{class:"pty-h"},h("span",{text:"ПАТИ"}),h("span",{},h("b",{text:members.length}),"/"+size)));
@@ -503,15 +545,14 @@ function drawMatch(box,u,m){
   if(cap&&!(rep&&rep.team!==m.team)){
     var inp=h("input",{type:"file",accept:"image/png,image/jpeg,image/webp","aria-label":"Скриншот результата"});
     inp.addEventListener("change",function(){var f=inp.files[0];if(!f)return;
-      if(f.size>5*1024*1024){toast("Файл больше 5 МБ",true);return}
-      BUSY=true;
-      fetch("/api/shots/"+m.id,{method:"POST",headers:{Authorization:"Bearer "+TOKEN,"Content-Type":f.type||"application/octet-stream"},body:f})
-        .then(function(r){return r.json().catch(function(){return{}}).then(function(d){if(!r.ok)throw new Error(d.error||"Ошибка "+r.status);return d})})
+      BUSY=true;toast("Загружаю скриншот…");
+      prepShot(f).then(function(b){return fetch("/api/shots/"+m.id,{method:"POST",headers:{Authorization:"Bearer "+TOKEN,"Content-Type":"image/jpeg"},body:b})})
+        .then(function(r){return r.json().catch(function(){return{}}).then(function(d){if(!r.ok)throw uploadErr(r,d);return d})})
         .then(function(){BUSY=false;toast("Скриншот прикреплён");renderFind()})
         .catch(function(e){BUSY=false;toast(e.message,true)})});
     var win=h("select",{"aria-label":"Кто победил"},h("option",{value:"me",text:"Мы победили"}),h("option",{value:"enemy",text:"Победили соперники"}));
     var sc=h("input",{maxlength:10,placeholder:"Счёт, например 13:9","aria-label":"Счёт"});
-    res.appendChild(h("div",{class:"form"},h("label",{},h("span",{text:"Прикрепить скриншот (PNG, JPG, WEBP до 5 МБ)"}),inp),
+    res.appendChild(h("div",{class:"form"},h("label",{},h("span",{text:"Прикрепить скриншот результата (сожмётся автоматически)"}),inp),
       h("div",{class:"two"},win,sc),
       h("div",{class:"row"},h("button",{class:"btn",text:"Отправить результат",disabled:!mine,onclick:function(){act("/api/match/report",{winner:win.value,score:sc.value})}}),
         mine?null:h("span",{class:"muted",text:"Сначала прикрепите скриншот"}))))}
@@ -575,8 +616,9 @@ function renderMe(){
   loadMe().then(function(){
     var d=S.me;
     if(!d.user){me.appendChild(loginCard());return}
-    if(!d.user.game_id)me.appendChild(h("div",{class:"card"},h("b",{text:"Укажите ID в игре"}),
-      h("p",{class:"meta",text:"Без ID играть нельзя: по нему игроки матча находят друг друга. Введите его в поле «ID в игре» ниже и нажмите «Сохранить». ID вводится один раз и навсегда."})));
+    if(d.user.id_status!=="ok")me.appendChild(h("div",{class:"card"},h("b",{text:d.user.id_status==="pending"?"ID на проверке":"Подтвердите ID в игре"}),
+      h("p",{class:"meta",text:"Без подтверждённого ID играть нельзя: по нему игроки матча находят друг друга. Администратор сверяет ID со скриншотом вашего игрового профиля."})));
+    me.appendChild(idCard(d.user));
     me.appendChild(avatarCard(d.user));
     var sc=h("div",{class:"card"},h("h2",{text:"Моя статистика"}),h("p",{class:"muted",text:"Загружаю…"}));me.appendChild(sc);
     function fillStats(el){clear(sc);sc.appendChild(h("h2",{text:"Моя статистика"}));sc.appendChild(el)}
@@ -584,7 +626,7 @@ function renderMe(){
       .catch(function(){fillStats(h("p",{class:"muted",text:"Не удалось загрузить статистику."}))});
     me.appendChild(accountCard(d.user));
     me.appendChild(profileCard(d.user));
-    if(NEEDID&&!d.user.game_id)setTimeout(function(){var g=$("#gidf");if(g){g.scrollIntoView({block:"center"});g.focus()}},100);
+    if(NEEDID&&d.user.id_status!=="ok")setTimeout(function(){var g=$("#gidf");if(g){g.scrollIntoView({block:"center"});if(!g.disabled)g.focus()}NEEDID=false},100);
   }).catch(function(e){me.appendChild(h("div",{class:"empty",text:e.message}))})}
 function loginCard(){
   var st=h("p",{class:"muted"});var btn=h("button",{class:"btn",text:"Войти через Telegram",onclick:function(){start()}});
@@ -606,22 +648,17 @@ function loginCard(){
 function avatarCard(u){return h("div",{class:"card"},h("h2",{text:"Аватар"}),avatarBlock(u))}
 function accountCard(u){
   return h("div",{class:"card"},h("h2",{text:"Аккаунт"}),
-    idRow(u.game_id),
+    u.id_status==="ok"?null:idRow(u.game_id),
     h("div",{class:"meta"},"Telegram: ",tgLink(u.tg)||"привязан (username скрыт)",h("span",{class:"ok",text:" ✓ привязан"})),
     h("div",{class:"row"},h("button",{class:"btn ghost sm",text:"Выйти",onclick:function(){
       call("/api/logout",{}).catch(function(){}).then(function(){setToken(null);S.me=null;renderNav();route()})}})))}
 function field(label,el){return h("label",{},h("span",{text:label}),el)}
 function profileCard(u){
-  var nick=h("input",{maxlength:32,required:true,value:u.nick}),gid=h("input",{id:"gidf",maxlength:20,value:u.game_id||"",disabled:!!u.game_id,placeholder:"Только цифры",autocomplete:"off",inputmode:"numeric",pattern:"[0-9]*"}),
+  var nick=h("input",{maxlength:32,required:true,value:u.nick}),
     about=h("textarea",{maxlength:300,rows:3,placeholder:"Опыт, часы в игре, когда играете"},u.about);
-  var f=h("form",{class:"form"},field("Ник",nick),field("ID в игре",gid),h("p",{class:"muted",text:u.game_id?"ID сохранён и больше не меняется. Если ошиблись, напишите администратору.":"Введите ID из игры. Вводится один раз и навсегда: потом изменить его нельзя. Только цифры."}),field("О себе",about),
+  var f=h("form",{class:"form"},field("Ник",nick),field("О себе",about),
     h("div",{class:"row"},h("button",{class:"btn",type:"submit",text:"Сохранить"})));
-  gid.addEventListener("input",function(){gid.value=gid.value.replace(/\D/g,"")});
-  f.addEventListener("submit",function(e){e.preventDefault();
-    var first=!u.game_id&&gid.value.trim();
-    if(first&&!confirm("ID "+gid.value.trim()+" нельзя будет изменить. Сохранить?"))return;
-    act("/api/profile",{nick:nick.value,game_id:gid.value,about:about.value},"Профиль сохранён").then(function(){
-      if(first&&NEEDID&&S.me&&S.me.user&&S.me.user.game_id){NEEDID=false;toast("ID сохранён, можно искать игру");go("find")}})});
+  f.addEventListener("submit",function(e){e.preventDefault();act("/api/profile",{nick:nick.value,about:about.value},"Профиль сохранён")});
   return h("div",{class:"card"},h("h2",{text:"Профиль"}),f)}
 
 /* ---------- демо-режим: включается сам, если сервера бота нет ---------- */
