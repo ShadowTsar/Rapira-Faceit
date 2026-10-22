@@ -5,15 +5,17 @@
   ADMIN_IDS     - ваши Telegram ID через запятую (кто может менять таблицу топа)
   PUBLIC_URL    - https-адрес сайта, например https://myapp.onrender.com
   PORT          - порт (хостинг обычно задаёт сам)
-  DATA_FILE     - файл с топом игроков (по умолчанию data.json)
+  DATABASE_URL  - строка подключения к Postgres (Neon). Если задана, ВСЕ данные (топ, пользователи,
+                  матчи, скриншоты, аватарки) хранятся в базе и не пропадают при деплое
+  DATA_FILE     - файл с топом игроков (по умолчанию data.json), нужен только без DATABASE_URL
   APP_FILE      - файл с пользователями, командами, заявками (по умолчанию app.json)
   BOT_USERNAME  - необязательно, @username бота (иначе берётся через getMe)
-  SHOTS_DIR     - папка для скриншотов матчей (по умолчанию shots рядом с APP_FILE)
-  AVATARS_DIR   - папка для аватарок (по умолчанию avatars рядом с APP_FILE)
+  SHOTS_DIR / AVATARS_DIR - папки для картинок, только без DATABASE_URL
 
-Важно: DATA_FILE и APP_FILE должны лежать на постоянном диске хостинга.
+Важно: без DATABASE_URL файлы должны лежать на постоянном диске хостинга.
 """
 import asyncio
+import copy
 import hashlib
 import hmac
 import json
@@ -24,18 +26,19 @@ import secrets
 import tempfile
 import time
 from pathlib import Path
-from urllib.parse import parse_qsl
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import (CallbackQuery, InlineKeyboardButton,
-                           InlineKeyboardMarkup, Message, WebAppInfo, FSInputFile)
+                           InlineKeyboardMarkup, Message, WebAppInfo, BufferedInputFile)
 from aiohttp import web
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").replace(" ", "").split(",") if x}
 PUBLIC_URL = os.getenv("PUBLIC_URL", "").rstrip("/")
 PORT = int(os.getenv("PORT", "8080"))
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 DATA_FILE = Path(os.getenv("DATA_FILE", "data.json"))
 APP_FILE = Path(os.getenv("APP_FILE", "app.json"))
 BOT_USERNAME = os.getenv("BOT_USERNAME", "").lstrip("@")
@@ -59,14 +62,168 @@ bot = Bot(BOT_TOKEN)
 NOSTORE = {"Cache-Control": "no-store"}
 
 
+# ---------- хранилище: Postgres (DATABASE_URL) или файлы ----------
+CTYPES = {"png": "image/png", "jpg": "image/jpeg", "webp": "image/webp"}
+_pg = None            # пул соединений asyncpg
+_cache: dict = {}     # "app" - все данные сайта, "top" - таблица топа
+_dirty: set = set()   # ключи, которые нужно записать
+_gone: set = set()    # картинки, которые нужно удалить
+_wake = None
+
+
+def _pg_args(url: str):
+    """asyncpg не знает sslmode/channel_binding из строки Neon: убираем их и включаем SSL отдельно."""
+    u = urlsplit(url)
+    q = dict(parse_qsl(u.query))
+    mode = q.pop("sslmode", "require")
+    q.pop("channel_binding", None)
+    return urlunsplit(u._replace(query=urlencode(q))), (False if mode == "disable" else "require")
+
+
+async def _q(op: str, sql: str, *args):
+    """Запрос с повтором: Neon на бесплатном плане засыпает и просыпается не мгновенно."""
+    for i in range(3):
+        try:
+            return await getattr(_pg, op)(sql, *args)
+        except Exception:
+            if i == 2:
+                raise
+            logging.warning("Postgres: повторяю запрос (%s)", i + 1)
+            await asyncio.sleep(1 + i)
+
+
+def _blob_path(key: str) -> Path:
+    kind, name = key.split("/", 1)
+    return (SHOTS_DIR if kind == "shot" else AVATARS_DIR) / name
+
+
+async def _persist(key: str) -> None:
+    obj = _cache.get(key)
+    if _pg:
+        await _q("execute", "INSERT INTO kv (key, value, updated) VALUES ($1, $2::jsonb, now()) "
+                 "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated = now()",
+                 key, json.dumps(obj, ensure_ascii=False))
+    else:
+        _atomic_write(APP_FILE if key == "app" else DATA_FILE, obj)
+
+
+async def _blob_delete(keys: list) -> None:
+    if _pg:
+        await _q("execute", "DELETE FROM blobs WHERE key = ANY($1::text[])", keys)
+    else:
+        for k in keys:
+            _blob_path(k).unlink(missing_ok=True)
+
+
+async def _writer() -> None:
+    """Пишет изменения в базу в фоне; несколько быстрых сохранений склеиваются в одну запись."""
+    while True:
+        await _wake.wait()
+        _wake.clear()
+        while _dirty or _gone:
+            try:
+                while _dirty:
+                    k = _dirty.pop()
+                    try:
+                        await _persist(k)
+                    except Exception:
+                        _dirty.add(k)
+                        raise
+                if _gone:
+                    ks = list(_gone)
+                    _gone.difference_update(ks)
+                    try:
+                        await _blob_delete(ks)
+                    except Exception:
+                        _gone.update(ks)
+                        raise
+            except Exception:
+                logging.exception("Не удалось записать данные, повтор через 5 секунд")
+                await asyncio.sleep(5)
+
+
+async def store_init() -> None:
+    global _pg, _wake
+    _wake = asyncio.Event()
+    if DATABASE_URL:
+        import asyncpg
+        dsn, ssl = _pg_args(DATABASE_URL)
+        for i in range(5):
+            try:
+                _pg = await asyncpg.create_pool(dsn, ssl=ssl, min_size=1, max_size=4, timeout=30,
+                                                command_timeout=30, statement_cache_size=0,  # пул Neon = pgbouncer
+                                                max_inactive_connection_lifetime=120)
+                break
+            except Exception:
+                if i == 4:
+                    raise
+                logging.warning("Postgres недоступен, повтор через 3 секунды")
+                await asyncio.sleep(3)
+        await _q("execute", "CREATE TABLE IF NOT EXISTS kv (key text PRIMARY KEY, value jsonb NOT NULL, "
+                 "updated timestamptz NOT NULL DEFAULT now())")
+        await _q("execute", "CREATE TABLE IF NOT EXISTS blobs (key text PRIMARY KEY, data bytea NOT NULL, "
+                 "created timestamptz NOT NULL DEFAULT now())")
+        for r in await _q("fetch", "SELECT key, value FROM kv"):
+            _cache[r["key"]] = json.loads(r["value"])
+        logging.info("Хранилище: Postgres, ключей в базе: %s", len(_cache))
+    else:
+        logging.warning("DATABASE_URL не задан: данные в файлах и пропадут при деплое на бесплатном хостинге")
+    for key, path in (("app", APP_FILE), ("top", DATA_FILE)):  # перенос старых файлов, если в базе пусто
+        if key not in _cache and path.exists():
+            try:
+                _cache[key] = json.loads(path.read_text(encoding="utf-8"))
+                if _pg:
+                    _dirty.add(key)
+                    logging.info("Данные %s перенесены из файла %s в Postgres", key, path)
+            except (json.JSONDecodeError, OSError):
+                pass
+    asyncio.create_task(_writer())
+    if _dirty:
+        _wake.set()
+
+
+async def store_flush() -> None:
+    for _ in range(40):
+        if not (_dirty or _gone):
+            return
+        _wake.set()
+        await asyncio.sleep(0.25)
+
+
+def _mark(key: str) -> None:
+    _dirty.add(key)
+    if _wake:
+        _wake.set()
+
+
+async def blob_put(key: str, data: bytes) -> None:
+    _gone.discard(key)
+    if _pg:
+        await _q("execute", "INSERT INTO blobs (key, data) VALUES ($1, $2) "
+                 "ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, created = now()", key, data)
+    else:
+        p = _blob_path(key)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
+
+
+async def blob_get(key: str):
+    if _pg:
+        row = await _q("fetchrow", "SELECT data FROM blobs WHERE key = $1", key)
+        return bytes(row["data"]) if row else None
+    p = _blob_path(key)
+    return p.read_bytes() if p.is_file() else None
+
+
+def blob_del(key: str) -> None:
+    _gone.add(key)
+    if _wake:
+        _wake.set()
+
+
 # ---------- топ (как раньше) ----------
 def load() -> list:
-    if not DATA_FILE.exists():
-        return []
-    try:
-        return json.loads(DATA_FILE.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return []
+    return copy.deepcopy(_cache.get("top") or [])
 
 
 def _atomic_write(path: Path, obj) -> None:
@@ -78,7 +235,8 @@ def _atomic_write(path: Path, obj) -> None:
 
 
 def save(data: list) -> None:
-    _atomic_write(DATA_FILE, data)
+    _cache["top"] = data
+    _mark("top")
 
 
 LEVELS = [800, 950, 1100, 1250, 1400, 1550, 1700, 1850, 2000]
@@ -130,19 +288,15 @@ class ApiError(Exception):
 
 
 def db_load() -> dict:
-    d = {}
-    if APP_FILE.exists():
-        try:
-            d = json.loads(APP_FILE.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            d = {}
+    d = copy.deepcopy(_cache.get("app") or {})  # копия: если запрос упадёт, кэш не испортится
     for k in ("users", "sessions", "codes", "friends", "freqs", "parties", "pinvites", "queue", "matches"):
         d.setdefault(k, {})
     return d
 
 
 def db_save(db: dict) -> None:
-    _atomic_write(APP_FILE, db)
+    _cache["app"] = db
+    _mark("app")
 
 
 def cleanup(db: dict) -> None:
@@ -157,11 +311,8 @@ def cleanup(db: dict) -> None:
         if m["status"] == "active" and m["created"] < t - MATCH_TTL:
             m["status"], m["ended"] = "cancelled", int(t)
         elif m["status"] in ("finished", "cancelled") and m.get("ended", 0) < t - KEEP_DAYS * 86400:
-            for f in SHOTS_DIR.glob(f"{mid}_*"):
-                try:
-                    f.unlink()
-                except OSError:
-                    pass
+            for sh in m["shots"]:
+                blob_del(f"shot/{mid}_{sh['id']}")
             del db["matches"][mid]
 
 
@@ -365,9 +516,7 @@ def notify_admins_dispute(db, m, outbox):
     for a in ADMIN_IDS:
         outbox.append((a, "\n".join(lines), None))
         for sh in m["shots"][:6]:
-            path = SHOTS_DIR / f"{m['id']}_{sh['id']}.{sh['ext']}"
-            if path.is_file():
-                outbox.append((a, f"Скриншот: команда {sh['team'] + 1}", None, str(path)))
+            outbox.append((a, f"Скриншот: команда {sh['team'] + 1}", None, f"shot/{m['id']}_{sh['id']}"))
 
 
 def match_view(db, m, me):
@@ -456,8 +605,9 @@ async def flush(outbox: list) -> None:
                 markup = InlineKeyboardMarkup(inline_keyboard=[[
                     InlineKeyboardButton(text=t, url=d[4:]) if d.startswith("url:")
                     else InlineKeyboardButton(text=t, callback_data=d) for t, d in kb]])
-            if photo:
-                await bot.send_photo(tg_id, FSInputFile(photo), caption=text)
+            data = await blob_get(photo) if photo else None
+            if data:
+                await bot.send_photo(tg_id, BufferedInputFile(data, filename="screenshot.jpg"), caption=text)
             else:
                 await bot.send_message(tg_id, text, reply_markup=markup)
         except Exception:
@@ -1223,8 +1373,7 @@ async def api_shot_upload(request):
         if sum(1 for x in m["shots"] if x["team"] == ti) >= 5:
             return web.json_response({"error": "Можно прикрепить не больше 5 скриншотов"}, status=400, headers=NOSTORE)
         sid = secrets.token_hex(6)
-        SHOTS_DIR.mkdir(parents=True, exist_ok=True)
-        (SHOTS_DIR / f"{m['id']}_{sid}.{ext}").write_bytes(data)
+        await blob_put(f"shot/{m['id']}_{sid}", data)
         m["shots"].append({"id": sid, "team": ti, "ext": ext, "ts": int(time.time())})
         db_save(db)
     return web.json_response({"ok": True}, headers=NOSTORE)
@@ -1240,10 +1389,11 @@ async def api_shot_get(request):
     if team_idx(m, uid_of(user)) is None and user["tg_id"] not in ADMIN_IDS:
         return web.Response(status=403)
     sh = next((x for x in m["shots"] if x["id"] == request.match_info["sid"]), None)
-    path = SHOTS_DIR / f"{m['id']}_{sh['id']}.{sh['ext']}" if sh else None
-    if not path or not path.is_file():
+    data = await blob_get(f"shot/{m['id']}_{sh['id']}") if sh else None
+    if not data:
         return web.Response(status=404)
-    return web.FileResponse(path, headers={**NOSTORE, "X-Content-Type-Options": "nosniff"})
+    return web.Response(body=data, content_type=CTYPES.get(sh["ext"], "application/octet-stream"),
+                        headers={**NOSTORE, "X-Content-Type-Options": "nosniff"})
 
 
 def sniff_ext(b: bytes):
@@ -1257,11 +1407,7 @@ def sniff_ext(b: bytes):
 
 
 def _drop_avatar_files(pid: str) -> None:
-    for f in AVATARS_DIR.glob(pid + ".*"):
-        try:
-            f.unlink()
-        except OSError:
-            pass
+    blob_del(f"avatar/{pid}")
 
 
 async def api_avatar_upload(request):
@@ -1274,9 +1420,7 @@ async def api_avatar_upload(request):
         user = session_user(db, request)
         if user is None:
             return web.json_response({"error": "Нужен вход через Telegram"}, status=401, headers=NOSTORE)
-        AVATARS_DIR.mkdir(parents=True, exist_ok=True)
-        _drop_avatar_files(user["pid"])
-        (AVATARS_DIR / f"{user['pid']}.{ext}").write_bytes(data)
+        await blob_put(f"avatar/{user['pid']}", data)
         user["avatar"], user["avatar_ext"] = int(time.time()), ext
         db_save(db)
     return web.json_response({"ok": True, "av": user["avatar"]}, headers=NOSTORE)
@@ -1288,11 +1432,11 @@ async def api_avatar_get(request):
         u = user_by_pid(db_load(), pid)
     if not u or not u.get("avatar"):
         return web.Response(status=404)
-    path = AVATARS_DIR / f"{pid}.{u.get('avatar_ext', 'jpg')}"
-    if not path.is_file():
+    data = await blob_get(f"avatar/{pid}")
+    if not data:
         return web.Response(status=404)
-    return web.FileResponse(path, headers={"Cache-Control": "public, max-age=86400",
-                                           "X-Content-Type-Options": "nosniff"})
+    return web.Response(body=data, content_type=CTYPES.get(u.get("avatar_ext", "jpg"), "image/jpeg"),
+                        headers={"Cache-Control": "public, max-age=86400", "X-Content-Type-Options": "nosniff"})
 
 
 @api()
@@ -1324,7 +1468,9 @@ async def debug(_):
     """Диагностика: какой файл отдаётся сайтом (можно удалить после настройки)."""
     path = _index_path()
     info = {"base": str(BASE), "files": sorted(x.name for x in BASE.iterdir())[:40],
-            "static_dir": (BASE / "static").is_dir(), "index_path": str(path) if path else None}
+            "static_dir": (BASE / "static").is_dir(), "index_path": str(path) if path else None,
+            "storage": "postgres" if _pg else "files (данные пропадут при деплое!)",
+            "users": len((_cache.get("app") or {}).get("users", {})), "top_rows": len(_cache.get("top") or [])}
     if path:
         raw = path.read_bytes()
         txt = raw.decode("utf-8", "replace")
@@ -1354,6 +1500,7 @@ async def health(_):
 async def main():
     global BOT_USERNAME
     logging.basicConfig(level=logging.INFO)
+    await store_init()
     if not ADMIN_IDS:
         logging.warning("ADMIN_IDS пуст: менять таблицу никто не сможет")
     if not BOT_USERNAME:
@@ -1398,7 +1545,10 @@ async def main():
 
     dp = Dispatcher()
     dp.include_router(router)
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await store_flush()  # дописать последние изменения в базу
 
 
 if __name__ == "__main__":
