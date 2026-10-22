@@ -753,11 +753,11 @@ async def cmd_start(m: Message, command: CommandObject):
             f"Ваш Telegram ID: {m.from_user.id}")
     if is_admin(m):
         text += ("\n\nКоманды админа:\n"
-                 "/elo Ник 4210 [K/D] [победы] - добавить или изменить\n"
-                 "/del Ник - удалить\n"
+                 "/untop ID_или_@ник - убрать игрока из топа\n"
                  "/resetid ID_в_игре - сбросить ID игрока (если ошибся)\n"
                  "/ban ID_или_@ник [причина], /unban, /banlist - блокировки\n"
-                 "/users - кто зарегистрирован (чтобы добавить в топ)\n"
+                 "/users - зарегистрировались, но ещё не в топе\n"
+                 "/userstop - игроки, которые уже в топе\n"
                  "/stat ID_в_игре ELO [K/D] [победы] - начислить статистику (/stat ID +25 - прибавить ELO)\n"
                  "/matches - последние матчи, /match ID - подробности и скриншоты\n"
                  "/winner ID CT|T - победила сторона (CT = Counter-Terrorist, T = Terrorist)\n"
@@ -844,37 +844,6 @@ async def cmd_top(m: Message):
     await m.answer("\n".join(f"{p['rank']}. {p['nick']} - {p['elo']}" for p in rows))
 
 
-@router.message(Command("elo"))
-async def cmd_elo(m: Message, command: CommandObject):
-    if not is_admin(m):
-        return await m.answer("Нет доступа.")
-    try:
-        nick, elo, kd, win = parse_parts((command.args or "").split())
-    except (ValueError, IndexError):
-        return await m.answer("Формат: /elo Ник 4210 [K/D] [победы]")
-    async with lock:
-        data = load()
-        upsert(data, nick, elo, kd, win)
-        save(data)
-    await m.answer(f"Готово: {nick} - {elo}")
-
-
-@router.message(Command("del"))
-async def cmd_del(m: Message, command: CommandObject):
-    if not is_admin(m):
-        return await m.answer("Нет доступа.")
-    nick = (command.args or "").strip()
-    if not nick:
-        return await m.answer("Формат: /del Ник")
-    async with lock:
-        data = load()
-        new = [p for p in data if p["nick"].lower() != nick.lower()]
-        if len(new) == len(data):
-            return await m.answer("Такого игрока нет.")
-        save(new)
-    await m.answer(f"Удалён: {nick}")
-
-
 MSK = timezone(timedelta(hours=3))
 STATUS_RU = {"active": "идёт", "disputed": "спорный", "finished": "завершён", "cancelled": "отменён"}
 
@@ -900,10 +869,10 @@ async def cmd_admin(m: Message):
         return await m.answer("Нет доступа.")
     await m.answer(
         "Команды администратора:\n"
-        "/users - кто зарегистрирован (/users 2 - вторая страница, /users ник - поиск)\n"
+        "/users - зарегистрировались, но не в топе (/users 2 - страница, /users ник - поиск)\n"
+        "/userstop - игроки в топе (/userstop 2 - страница, /userstop ник - поиск)\n"
+        "/untop ID_или_@ник - убрать игрока из топа\n"
         "/stat ID_в_игре ELO [K/D] [победы] - начислить статистику игроку, он попадёт в топ с профилем\n"
-        "/elo Ник ELO [K/D] [победы%] - добавить или обновить игрока в топе\n"
-        "/del Ник - убрать из топа\n"
         "/matches - последние матчи (/matches спор - только спорные)\n"
         "/match ID - подробности матча и скриншоты\n"
         "/winner ID CT|T - засчитать победу стороны (CT = Counter-Terrorist, T = Terrorist), работает и для засчитанных\n"
@@ -911,35 +880,96 @@ async def cmd_admin(m: Message):
         "/resetid ID_в_игре - сбросить ID игрока")
 
 
-@router.message(Command("users"))
+def _page_arg(arg: str):
+    arg = (arg or "").strip()
+    if arg.isdigit() and int(arg) <= 99:
+        return int(arg), ""
+    return 1, arg.lower().lstrip("@")
+
+
+def _top_sets(top):
+    return {p["nick"].lower() for p in top if not p.get("pid")}, {p["pid"] for p in top if p.get("pid")}
+
+
+@router.message(Command("users", "user"))
 async def cmd_users(m: Message, command: CommandObject):
+    # только те, кто зарегистрировался, но ещё не в топе (чтобы не мешали уже добавленные)
     if not is_admin(m):
         return await m.answer("Нет доступа.")
-    arg = (command.args or "").strip()
-    page, q = 1, ""
-    if arg.isdigit() and int(arg) <= 99:
-        page = int(arg)
-    else:
-        q = arg.lower().lstrip("@")
+    page, q = _page_arg(command.args)
     async with lock:
         db, top = db_load(), load()
+    nicks, pids = _top_sets(top)
     users = sorted(db["users"].values(), key=lambda u: u.get("created", 0), reverse=True)  # новые сверху
+    users = [u for u in users if u["pid"] not in pids and u["nick"].lower() not in nicks]
     if q:
         users = [u for u in users if q in u["nick"].lower() or q in (u.get("tg_username") or "").lower()
                  or q in (u.get("game_id") or "")]
     if not users:
-        return await m.answer("Никого не нашёл." if q else "Пока никто не зарегистрировался.")
+        return await m.answer("Никого не нашёл среди тех, кто не в топе." if q else
+                              "Все зарегистрированные уже в топе (или никто не регистрировался). Топ: /userstop")
     per = 40
     pages = (len(users) + per - 1) // per
     page = min(page, pages)
-    nicks = {p["nick"].lower() for p in top}
-    pids = {p["pid"] for p in top if p.get("pid")}
-    lines = [f"Зарегистрировано: {len(users)}" + (f" (страница {page}/{pages}, дальше: /users {page + 1})" if pages > 1 else "")]
+    lines = [f"Зарегистрировались, но не в топе: {len(users)}" + (f" (страница {page}/{pages}, дальше: /users {page + 1})" if pages > 1 else "")]
     for i, u in enumerate(users[(page - 1) * per:page * per], start=(page - 1) * per + 1):
-        in_top = u["nick"].lower() in nicks or u["pid"] in pids
-        lines.append(f"{i}. {u['nick']} | ID {u.get('game_id') or '-'} | {tg_tag(u)} | {'в топе' if in_top else 'не в топе'}")
-    lines.append("Добавить игрока в топ с профилем и аватаркой: /stat ID_в_игре ELO [K/D] [победы%]. Метка «в топе» ставится, если игрок есть в таблице.")
+        lines.append(f"{i}. {u['nick']} | ID {u.get('game_id') or '-'} | {tg_tag(u)}")
+    lines.append("Добавить в топ: /stat ID_в_игре ELO [K/D] [победы%]. Кто уже в топе: /userstop")
     await _send_long(m, lines)
+
+
+@router.message(Command("userstop"))
+async def cmd_userstop(m: Message, command: CommandObject):
+    if not is_admin(m):
+        return await m.answer("Нет доступа.")
+    page, q = _page_arg(command.args)
+    async with lock:
+        db, top = db_load(), load()
+    by_pid = {u["pid"]: u for u in db["users"].values()}
+    rows = []
+    for r in ranked(top):
+        u = by_pid.get(r.get("pid"))
+        rows.append((r, u))
+    if q:
+        rows = [(r, u) for r, u in rows if q in r["nick"].lower() or (u and (q in (u.get("tg_username") or "").lower()
+                                                                          or q in (u.get("game_id") or "")))]
+    if not rows:
+        return await m.answer("В топе никого не нашёл." if q else "В топе пока никого. Добавить: /stat ID_в_игре ELO")
+    per = 40
+    pages = (len(rows) + per - 1) // per
+    page = min(page, pages)
+    lines = [f"В топе: {len(rows)}" + (f" (страница {page}/{pages}, дальше: /userstop {page + 1})" if pages > 1 else "")]
+    for r, u in rows[(page - 1) * per:page * per]:
+        who = f"ID {u.get('game_id') or '-'} | {tg_tag(u)}" if u else "без профиля на сайте"
+        lines.append(f"{r['rank']}. {r['nick']} | ELO {r['elo']} | {who}")
+    lines.append("Убрать из топа: /untop ID_в_игре или @ник (для строк «без профиля» ник из списка)")
+    await _send_long(m, lines)
+
+
+@router.message(Command("untop"))
+async def cmd_untop(m: Message, command: CommandObject):
+    # убирает из топа именно игрока (по ID в игре или @нику), а не просто строку с ником
+    if not is_admin(m):
+        return await m.answer("Нет доступа.")
+    key = (command.args or "").strip()
+    if not key:
+        return await m.answer("Формат: /untop ID_в_игре или @ник\nСписок тех, кто в топе: /userstop")
+    async with lock:
+        db, data = db_load(), load()
+        u = find_user(db, key)
+        if u:
+            keep = [p for p in data if p.get("pid") != u["pid"]]
+            if len(keep) == len(data):  # нет строки с профилем: возможно, осталась старая строка с тем же ником без привязки
+                keep = [p for p in data if p.get("pid") or p["nick"].lower() != u["nick"].lower()]
+            name = u["nick"]
+        else:  # старая строка без профиля: убираем по точному нику
+            k = key.lstrip("@").lower()
+            keep = [p for p in data if p.get("pid") or p["nick"].lower() != k]
+            name = key.lstrip("@")
+        if len(keep) == len(data):
+            return await m.answer("Такого игрока нет в топе. Список: /userstop")
+        save(keep)
+    await m.answer(f"{name} убран из топа. Профиль и аккаунт на сайте остались.")
 
 
 @router.message(Command("stat"))
@@ -971,7 +1001,7 @@ async def cmd_stat(m: Message, command: CommandObject):
             if same and not same.get("pid"):
                 row = same  # ник уже был в топе без привязки: привязываем
             elif same:
-                return await m.answer(f"В топе уже есть другой игрок с ником {same['nick']}. Сначала /del {same['nick']}")
+                return await m.answer(f"В топе уже есть другой игрок с ником {same['nick']}. Сначала уберите его командой /untop ID_в_игре")
         if row is None:
             if delta:
                 return await m.answer("Игрока ещё нет в топе, укажите ELO числом без знака: /stat ID 1000")
