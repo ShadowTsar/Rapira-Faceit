@@ -49,6 +49,15 @@ SHOTS_DIR = Path(os.getenv("SHOTS_DIR", str(APP_FILE.parent / "shots")))
 MAX_SHOT = 5 * 1024 * 1024
 AVATARS_DIR = Path(os.getenv("AVATARS_DIR", str(APP_FILE.parent / "avatars")))
 MAX_AVATAR = 2 * 1024 * 1024
+MAPS = [("miramash", "Miramash"), ("palace", "Palace"), ("almero", "Almero"),
+        ("mirage_fps", "Mirage FPS"), ("dust2", "Dust II")]
+MAP_NAME = dict(MAPS)
+SIDE_NAME = {"CT": "Counter-Terrorist", "T": "Terrorist"}
+BAN_TURN = 45            # секунд на бан карты, потом бан случайный
+VOTE_TIME = 60           # секунд на голосование за карту
+CHAT_MAX = 200           # сообщений чата матча в памяти
+FRESH = 60              # заявка участвует в подборе, только если игрок был на сайте за последнюю минуту
+STALE_DROP = 300         # заявка без игрока дольше 5 минут удаляется
 QUEUE_TTL = 3600           # поиск без матча сбрасывается через час
 MATCH_TTL = 6 * 3600       # активный матч без результата отменяется через 6 часов
 KEEP_DAYS = 3              # сколько хранить скриншоты завершённых матчей
@@ -301,17 +310,22 @@ def db_save(db: dict) -> None:
     _mark("app")
 
 
-def cleanup(db: dict) -> None:
+def cleanup(db: dict) -> bool:
     t = time.time()
+    changed = False
     for k in [k for k, v in db["codes"].items() if v["exp"] < t]:
         del db["codes"][k]
     for k in [k for k, v in db["sessions"].items() if v["exp"] < t]:
         del db["sessions"][k]
-    for k in [k for k, v in db["queue"].items() if v["joined"] < t - QUEUE_TTL]:
+    for k in [k for k, v in db["queue"].items()
+              if v["joined"] < t - QUEUE_TTL or v.get("seen", v["joined"]) < t - STALE_DROP]:
         del db["queue"][k]
     for mid, m in list(db["matches"].items()):
         if m["status"] == "active" and m["created"] < t - MATCH_TTL:
             m["status"], m["ended"] = "cancelled", int(t)
+            changed = True
+        elif m["status"] == "active" and veto_tick(m, t):
+            changed = True
         elif m["status"] in ("finished", "cancelled"):
             ended = m.get("ended", 0)
             if m["shots"] and ended < t - KEEP_DAYS * 86400:  # скриншоты удаляем раньше самого матча
@@ -320,6 +334,7 @@ def cleanup(db: dict) -> None:
                 m["shots"] = []
             if ended < t - HISTORY_DAYS * 86400:
                 del db["matches"][mid]
+    return changed
 
 
 def ensure_user(db: dict, tg_id: int, username, first_name) -> dict:
@@ -359,6 +374,38 @@ def user_by_pid(db: dict, pid: str):
 def pub(u: dict) -> dict:
     return {"pid": u["pid"], "nick": u["nick"], "game_id": u.get("game_id", ""),
             "about": u.get("about", ""), "av": u.get("avatar", 0)}
+
+
+def top_stats(pid: str):
+    """Место, ELO, K/D и победы игрока, если он есть в топе (привязан к профилю)."""
+    r = next((x for x in ranked(load()) if x.get("pid") == pid), None)
+    if not r:
+        return None
+    return {"rank": r["rank"], "elo": r["elo"], "kd": r.get("kd", 0), "win": r.get("win", 0), "level": r["level"]}
+
+
+def match_record(db, uid: str) -> dict:
+    """Сколько завершённых матчей сыграл игрок и сколько выиграл (история хранится HISTORY_DAYS дней)."""
+    games = wins = 0
+    for m in db["matches"].values():
+        if m["status"] != "finished" or m.get("winner") is None:
+            continue
+        for i, t in enumerate(m["teams"]):
+            if uid in t["members"]:
+                games += 1
+                wins += 1 if m["winner"] == i else 0
+    return {"games": games, "wins": wins}
+
+
+def find_user(db, key: str):
+    """Игрок по ID в игре; если такого нет, по точному нику или Telegram-нику."""
+    k = key.strip().lstrip("@")
+    u = next((x for x in db["users"].values() if x.get("game_id") and x["game_id"] == k), None)
+    if u:
+        return u
+    hits = [x for x in db["users"].values()
+            if x["nick"].lower() == k.lower() or (x.get("tg_username") or "").lower() == k.lower()]
+    return hits[0] if len(hits) == 1 else None
 
 
 def are_friends(db, a, b) -> bool:
@@ -470,9 +517,56 @@ def room_kb():
     return None
 
 
+def new_veto():
+    first = secrets.randbelow(2)  # какая команда банит первой - случайно
+    return {"phase": "ban", "order": [first, 1 - first, first], "bans": [], "started": int(time.time()),
+            "votes": {}, "picked": None, "left": []}
+
+
+def veto_ban(v, mp):
+    v["bans"].append({"map": mp, "team": v["order"][len(v["bans"])]})
+    v["started"] = int(time.time())
+    if len(v["bans"]) >= 3:  # три бана, остаются две карты
+        banned = {b["map"] for b in v["bans"]}
+        v["left"] = [k for k, _ in MAPS if k not in banned]
+        v["phase"] = "vote"
+
+
+def veto_pick(m, force=False):
+    v, total = m["veto"], 2 * m["size"]
+    cnt = {k: 0 for k in v["left"]}
+    for k in v["votes"].values():
+        if k in cnt:
+            cnt[k] += 1
+    top = max(cnt.values())
+    if not force and top * 2 <= total and len(v["votes"]) < total:
+        return  # большинства ещё нет и не все проголосовали
+    v["picked"] = secrets.choice([k for k, c in cnt.items() if c == top])  # при равенстве - случайно
+    v["phase"] = "done"
+
+
+def veto_tick(m, now) -> bool:
+    v = m.get("veto")
+    if not v:
+        return False
+    if v["phase"] == "ban" and now - v["started"] > BAN_TURN:
+        taken = {b["map"] for b in v["bans"]}
+        veto_ban(v, secrets.choice([k for k, _ in MAPS if k not in taken]))
+        return True
+    if v["phase"] == "vote" and now - v["started"] > VOTE_TIME:
+        veto_pick(m, force=True)
+        return True
+    return False
+
+
+def is_fresh(t) -> bool:
+    return t.get("seen", t["joined"]) > time.time() - FRESH
+
+
 def try_match(db, n, outbox):
     while True:
-        tickets = sorted((t for t in db["queue"].values() if t["size"] == n), key=lambda t: t["joined"])
+        tickets = sorted((t for t in db["queue"].values() if t["size"] == n and is_fresh(t)),
+                         key=lambda t: t["joined"])
         res = find_split(tickets, n)
         if not res:
             return
@@ -483,8 +577,10 @@ def try_match(db, n, outbox):
         for i in res[0] + res[1]:
             db["queue"].pop(tickets[i]["id"], None)
         mid = secrets.token_hex(4)
+        sides = secrets.choice([["CT", "T"], ["T", "CT"]])  # стороны выдаются случайно
         db["matches"][mid] = {"id": mid, "size": n, "status": "active", "created": int(time.time()),
-                              "teams": teams, "shots": [], "report": None, "cancel_votes": []}
+                              "teams": teams, "shots": [], "report": None, "cancel_votes": [],
+                              "sides": sides, "veto": new_veto(), "chat": [], "chat_seq": 0}
         for ti, t in enumerate(teams, start=1):
             cap = db["users"][t["captain"]]
             for uid in t["members"]:
@@ -492,11 +588,11 @@ def try_match(db, n, outbox):
                 if not u:
                     continue
                 if uid == t["captain"]:
-                    role = ("Вы капитан команды: после игры сделайте скриншот результата "
-                            "и прикрепите его в комнате матча.")
+                    role = ("Вы капитан команды: забаньте карты в комнате матча, а после игры "
+                            "прикрепите скриншот результата.")
                 else:
                     role = f"Капитан вашей команды: {cap['nick']} ({tg_tag(cap)})."
-                outbox.append((u["tg_id"], f"Матч {n}x{n} найден! Вы в команде {ti}.\n{role}", room_kb()))
+                outbox.append((u["tg_id"], f"Матч {n}x{n} найден! Вы в команде {ti}, сторона: {SIDE_NAME[sides[ti - 1]]}.\n{role}", room_kb()))
 
 
 def end_match(db, m, status, outbox, text, winner=None):
@@ -540,7 +636,19 @@ def match_view(db, m, me):
             mem.append(d)
         teams.append({"members": mem})
     rep = m.get("report")
+    v, vv = m.get("veto"), None
+    if v:
+        cnt = {k: 0 for k in v["left"]}
+        for k in v["votes"].values():
+            if k in cnt:
+                cnt[k] += 1
+        limit = BAN_TURN if v["phase"] == "ban" else VOTE_TIME
+        vv = {"phase": v["phase"], "pool": [k for k, _ in MAPS], "bans": v["bans"],
+              "turn": v["order"][len(v["bans"])] if v["phase"] == "ban" else None,
+              "left": v["left"], "votes": cnt, "my_vote": v["votes"].get(me), "picked": v["picked"],
+              "timer": max(0, int(limit - (time.time() - v["started"]))) if v["phase"] in ("ban", "vote") else 0}
     return {"id": m["id"], "size": m["size"], "team": ti, "captain": m["teams"][ti]["captain"] == me,
+            "sides": m.get("sides"), "veto": vv,
             "teams": teams, "shots": [{"id": x["id"], "team": x["team"]} for x in m["shots"]],
             "report": {"team": rep["team"], "winner": rep["winner"], "score": rep["score"]} if rep else None,
             "cancel_votes": m["cancel_votes"]}
@@ -645,7 +753,9 @@ async def cmd_start(m: Message, command: CommandObject):
                  "/import - заменить весь список (строки: ник ELO K/D победы)\n"
                  "/link Ник ID_в_игре - привязать аватарку игрока к нику в топе\n"
                  "/resetid ID_в_игре - сбросить ID игрока (если ошибся)\n"
+                 "/ban ID_или_@ник [причина], /unban, /banlist - блокировки\n"
                  "/users - кто зарегистрирован (чтобы добавить в топ)\n"
+                 "/stat ID_в_игре ELO [K/D] [победы] - начислить статистику (/stat ID +25 - прибавить ELO)\n"
                  "/matches - последние матчи, /match ID - подробности и скриншоты\n"
                  "/winner ID 1|2 - назначить победителя\n"
                  "/cancelmatch ID - отменить матч")
@@ -815,6 +925,7 @@ async def cmd_admin(m: Message):
     await m.answer(
         "Команды администратора:\n"
         "/users - кто зарегистрирован (/users 2 - вторая страница, /users ник - поиск)\n"
+        "/stat ID_в_игре ELO [K/D] [победы] - начислить статистику игроку, он попадёт в топ с профилем\n"
         "/elo Ник ELO [K/D] [победы%] - добавить или обновить игрока в топе\n"
         "/del Ник - убрать из топа\n"
         "/import - заменить весь топ списком\n"
@@ -855,6 +966,57 @@ async def cmd_users(m: Message, command: CommandObject):
         lines.append(f"{i}. {u['nick']} | ID {u.get('game_id') or '-'} | {tg_tag(u)} | {'в топе' if in_top else 'не в топе'}")
     lines.append("Добавить в топ: /elo Ник ELO [K/D] [победы%]. Метка «в топе» ставится, если такой ник есть в топе или он привязан через /link.")
     await _send_long(m, lines)
+
+
+@router.message(Command("stat"))
+async def cmd_stat(m: Message, command: CommandObject):
+    # начисление после матча: игрок попадает в топ, и к его строке привязывается профиль
+    if not is_admin(m):
+        return await m.answer("Нет доступа.")
+    usage = ("Формат: /stat ID_в_игре ELO [K/D] [победы]\nПример: /stat 12345678 1500 1.35 56\n"
+             "Прибавить или отнять ELO: /stat 12345678 +25  или  /stat 12345678 -20")
+    parts = (command.args or "").split()
+    try:
+        delta = parts[1][0] in "+-"
+        val = int(parts[1])
+        kd = float(parts[2].replace(",", ".")) if len(parts) > 2 else None
+        win = int(parts[3]) if len(parts) > 3 else None
+    except (ValueError, IndexError):
+        return await m.answer(usage)
+    if (kd is not None and not 0 <= kd <= 20) or (win is not None and not 0 <= win <= 100):
+        return await m.answer("K/D должен быть от 0 до 20, победы от 0 до 100.")
+    outbox = []
+    async with lock:
+        db, data = db_load(), load()
+        u = find_user(db, parts[0])
+        if not u:
+            return await m.answer("Игрок не найден. Список зарегистрированных: /users")
+        row = next((x for x in data if x.get("pid") == u["pid"]), None)
+        if row is None:
+            same = next((x for x in data if x["nick"].lower() == u["nick"].lower()), None)
+            if same and not same.get("pid"):
+                row = same  # ник уже был в топе без привязки: привязываем
+            elif same:
+                return await m.answer(f"В топе уже есть другой игрок с ником {same['nick']}. Сначала /del {same['nick']}")
+        if row is None:
+            if delta:
+                return await m.answer("Игрока ещё нет в топе, укажите ELO числом без знака: /stat ID 1000")
+            row = {"nick": u["nick"], "elo": val, "kd": 1.0, "win": 50}
+            data.append(row)
+        elif delta:
+            row["elo"] = max(0, row["elo"] + val)
+        else:
+            row["elo"] = max(0, val)
+        if kd is not None:
+            row["kd"] = kd
+        if win is not None:
+            row["win"] = win
+        row["pid"] = u["pid"]
+        save(data)
+        res = f"ELO {row['elo']}, K/D {float(row['kd']):.2f}, победы {row['win']}%"
+        outbox.append((u["tg_id"], f"Вам начислена статистика: {res}. Ваш профиль в топе: {PUBLIC_URL or 'на сайте'}", None))
+    await m.answer(f"Готово: {u['nick']} (ID {u.get('game_id') or '-'}) - {res}. Профиль привязан к топу.")
+    await flush(outbox)
 
 
 @router.message(Command("matches"))
@@ -905,6 +1067,7 @@ async def cmd_match(m: Message, command: CommandObject):
     if r:
         lines.append(f"Заявка капитана: победила команда {r.get('winner', 0) + 1}, счёт {r.get('score') or '-'}")
     lines.append(f"Скриншотов: {len(mt['shots'])}" + ("" if mt["shots"] else f" (удаляются через {KEEP_DAYS} дн. после матча)"))
+    lines.append("Начислить статистику игроку: /stat ID_в_игре ELO K/D победы")
     await _send_long(m, lines)
     await flush([(m.from_user.id, f"Скриншот: команда {sh['team'] + 1}", None, f"shot/{mt['id']}_{sh['id']}")
                  for sh in mt["shots"][:6]])
@@ -987,6 +1150,65 @@ async def cmd_resetid(m: Message, command: CommandObject):
     await flush([(u["tg_id"], "Администратор сбросил ваш ID в игре. Укажите правильный ID на сайте, он вводится один раз.", None)])
 
 
+@router.message(Command("queue"))
+async def cmd_queue(m: Message):
+    if not is_admin(m):
+        return await m.answer("Нет доступа.")
+    async with lock:
+        db = db_load()
+        rows = sorted(db["queue"].values(), key=lambda t: t["joined"])
+    if not rows:
+        return await m.answer("В поиске никого нет.")
+    now = time.time()
+    lines = []
+    for t in rows[:40]:
+        names = ", ".join(db["users"][u]["nick"] for u in t["members"] if u in db["users"])
+        state = "на сайте" if is_fresh(t) else f"не на сайте {int(now - t.get('seen', t['joined']))} с"
+        lines.append(f"{t['size']}x{t['size']}: {names} ({int(now - t['joined'])} с, {state})")
+    await m.answer("\n".join(lines))
+
+
+async def _ban_cmd(m: Message, command: CommandObject, ban: bool):
+    if not is_admin(m):
+        return await m.answer("Нет доступа.")
+    parts = (command.args or "").split(maxsplit=1)
+    if not parts:
+        return await m.answer("Формат: /ban ID_в_игре или @username [причина]" if ban
+                              else "Формат: /unban ID_в_игре или @username")
+    outbox = []
+    async with lock:
+        db = db_load()
+        u = find_user(db, parts[0])
+        if not u:
+            return await m.answer("Игрок не найден.")
+        if u["tg_id"] in ADMIN_IDS:
+            return await m.answer("Администратора заблокировать нельзя.")
+        apply_ban(db, u, ban, parts[1] if len(parts) > 1 else "", outbox)
+        db_save(db)
+    await m.answer(f"{'Заблокирован' if ban else 'Разблокирован'}: {u['nick']}")
+    await flush(outbox)
+
+
+@router.message(Command("ban"))
+async def cmd_ban(m: Message, command: CommandObject):
+    await _ban_cmd(m, command, True)
+
+
+@router.message(Command("unban"))
+async def cmd_unban(m: Message, command: CommandObject):
+    await _ban_cmd(m, command, False)
+
+
+@router.message(Command("banlist"))
+async def cmd_banlist(m: Message):
+    if not is_admin(m):
+        return await m.answer("Нет доступа.")
+    async with lock:
+        rows = [u for u in db_load()["users"].values() if u.get("banned")]
+    await m.answer("\n".join(f"{u['nick']} (ID {u.get('game_id') or '-'}){': ' + u['ban_reason'] if u.get('ban_reason') else ''}"
+                             for u in rows[:50]) or "Заблокированных нет.")
+
+
 # ---------- API сайта ----------
 def api(auth: bool = True):
     """Обёртка: блокировка, загрузка базы, авторизация, сохранение, уведомления в бота."""
@@ -1004,11 +1226,11 @@ def api(auth: bool = True):
             try:
                 async with lock:
                     db = db_load()
-                    cleanup(db)
+                    changed = cleanup(db)
                     user = session_user(db, request)
                     if auth and user is None:
                         raise ApiError(401, "Нужен вход через Telegram")
-                    ctx = {"dirty": request.method == "POST"}
+                    ctx = {"dirty": request.method == "POST" or bool(changed)}
                     res = fn(request, db, user, body, outbox, ctx)
                     if ctx["dirty"]:
                         db_save(db)
@@ -1077,7 +1299,8 @@ def api_me(request, db, user, body, outbox, ctx):
     if user is None:
         return {"user": None, "cfg": cfg}
     uid = uid_of(user)
-    return {"user": {**pub(user), "tg": user.get("tg_username", "")}, "cfg": cfg,
+    return {"user": {**pub(user), "tg": user.get("tg_username", ""), "admin": user["tg_id"] in ADMIN_IDS,
+                     "banned": bool(user.get("banned"))}, "cfg": cfg,
             "badges": {"friends": sum(1 for r in db["freqs"].values() if r["to"] == uid),
                        "party": sum(1 for i in db["pinvites"].values() if i["to"] == uid)}}
 
@@ -1128,6 +1351,13 @@ def api_user(request, db, user, body, outbox, ctx):
          "friends_count": len(db["friends"].get(uid_of(u), []))}
     if rel in ("friend", "self") and u.get("tg_username"):
         d["tg"] = u["tg_username"]  # Telegram виден только друзьям
+    st = top_stats(u["pid"])
+    if st:
+        d["stats"] = st
+    d["record"] = match_record(db, uid_of(u))
+    if user["tg_id"] in ADMIN_IDS:
+        d["banned"] = bool(u.get("banned"))
+        d["ban_reason"] = u.get("ban_reason", "")
     return d
 
 
@@ -1216,10 +1446,15 @@ def api_party(request, db, user, body, outbox, ctx):
             invites.append({"id": i["id"], "size": ip["size"], "count": len(ip["members"]),
                             "from": pub(db["users"][ip["owner"]])})
     t = queue_of(db, me)
+    if t:  # «я на сайте»: обновляем метку и сразу пробуем собрать матч (вдруг вернулся игрок, который выходил)
+        t["seen"] = time.time()
+        ctx["dirty"] = True
+        try_match(db, t["size"], outbox)
+        t = queue_of(db, me)
     queue = None
     if t:
         queue = {"size": t["size"], "need": 2 * t["size"], "elapsed": int(time.time() - t["joined"]),
-                 "waiting": sum(len(x["members"]) for x in db["queue"].values() if x["size"] == t["size"]),
+                 "waiting": sum(len(x["members"]) for x in db["queue"].values() if x["size"] == t["size"] and is_fresh(x)),
                  "can_cancel": t["owner"] == me}
     m = match_of(db, me)
     last = None
@@ -1231,7 +1466,7 @@ def api_party(request, db, user, body, outbox, ctx):
                 res = "win" if mm.get("winner") == ti else "lose"
             last = {"status": mm["status"], "result": res}
             break
-    modes = {n: sum(len(x["members"]) for x in db["queue"].values() if x["size"] == n) for n in SIZES}
+    modes = {n: sum(len(x["members"]) for x in db["queue"].values() if x["size"] == n and is_fresh(x)) for n in SIZES}
     return {"party": party_view(db, p, me) if p else None, "invites": invites, "modes": modes,
             "queue": queue, "match": match_view(db, m, me) if m else None, "last": last}
 
@@ -1373,12 +1608,17 @@ def api_queue_start(request, db, user, body, outbox, ctx):
         if match_of(db, m) or queue_of(db, m):
             raise ApiError(400, "Кто-то из пати уже в матче или поиске")
     for m in members:
+        bu = db["users"].get(m, {})
+        if bu.get("banned"):
+            raise ApiError(403, ("Вы заблокированы администратором" if m == me else f"Игрок {bu.get('nick')} заблокирован")
+                           + (f": {bu['ban_reason']}" if bu.get("ban_reason") else ""))
+    for m in members:
         if not db["users"].get(m, {}).get("game_id"):
             raise ApiError(400, "Сначала укажите ID в игре" if m == me
                            else f"У игрока {db['users'][m]['nick']} не указан ID в игре")
     tid = secrets.token_hex(4)
     db["queue"][tid] = {"id": tid, "owner": me, "party": pid, "members": members,
-                        "size": size, "joined": time.time()}
+                        "size": size, "joined": time.time(), "seen": time.time()}
     try_match(db, size, outbox)
     return {"message": "Матч найден!" if match_of(db, me) else "Ищем игру…"}
 
@@ -1404,6 +1644,100 @@ def _my_match(db, user):
     if not m:
         raise ApiError(404, "Активного матча нет")
     return me, m, team_idx(m, me)
+
+
+@api()
+def api_match_ban(request, db, user, body, outbox, ctx):
+    me, m, ti = _my_match(db, user)
+    v = m.get("veto")
+    if not v or v["phase"] != "ban":
+        raise ApiError(400, "Сейчас бан карт недоступен")
+    if m["teams"][ti]["captain"] != me:
+        raise ApiError(403, "Карты банят капитаны команд")
+    if v["order"][len(v["bans"])] != ti:
+        raise ApiError(400, "Сейчас ход капитана другой команды")
+    mp = body.get("map")
+    if mp not in MAP_NAME or any(b["map"] == mp for b in v["bans"]):
+        raise ApiError(400, "Эта карта недоступна")
+    veto_ban(v, mp)
+    return {"message": f"Карта {MAP_NAME[mp]} забанена"}
+
+
+@api()
+def api_match_vote(request, db, user, body, outbox, ctx):
+    me, m, ti = _my_match(db, user)
+    v = m.get("veto")
+    if not v or v["phase"] != "vote":
+        raise ApiError(400, "Голосование за карту сейчас не идёт")
+    mp = body.get("map")
+    if mp not in v["left"]:
+        raise ApiError(400, "Выберите одну из двух оставшихся карт")
+    v["votes"][me] = mp
+    veto_pick(m)
+    return {"message": "Голос принят"}
+
+
+def chat_msg(db, m, x):
+    u = db["users"].get(x["uid"], {})
+    return {"id": x["id"], "pid": u.get("pid", ""), "nick": u.get("nick", "?"), "av": u.get("avatar", 0),
+            "text": x["text"], "ts": int(x["ts"]), "team": team_idx(m, x["uid"])}
+
+
+@api()
+def api_match_chat_get(request, db, user, body, outbox, ctx):
+    me, m, ti = _my_match(db, user)
+    try:
+        since = int(request.query.get("since", 0))
+    except (TypeError, ValueError):
+        since = 0
+    return {"msgs": [chat_msg(db, m, x) for x in m.get("chat", []) if x["id"] > since]}
+
+
+@api()
+def api_match_chat_send(request, db, user, body, outbox, ctx):
+    me, m, ti = _my_match(db, user)
+    if user.get("banned"):
+        raise ApiError(403, "Вы заблокированы и не можете писать в чат")
+    text = " ".join(str(body.get("text", "")).split())[:300]
+    if not text:
+        raise ApiError(400, "Пустое сообщение")
+    chat, now = m.setdefault("chat", []), time.time()
+    if any(x["uid"] == me and now - x["ts"] < 1 for x in chat[-6:]):
+        raise ApiError(429, "Не так быстро")
+    m["chat_seq"] = m.get("chat_seq", 0) + 1
+    chat.append({"id": m["chat_seq"], "uid": me, "text": text, "ts": now})
+    del chat[:-CHAT_MAX]
+    return {"ok": True}
+
+
+def find_user(db, key: str):
+    key = key.strip().lstrip("@")
+    if not key:
+        return None
+    return next((u for u in db["users"].values()
+                 if key == (u.get("game_id") or "") or key.lower() == (u.get("tg_username") or "").lower()
+                 or key == u["pid"]), None)
+
+
+def apply_ban(db, u, banned: bool, reason: str, outbox) -> None:
+    u["banned"], u["ban_reason"] = banned, (reason[:200] if banned else "")
+    if banned:
+        t = queue_of(db, uid_of(u))
+        if t:
+            del db["queue"][t["id"]]
+    outbox.append((u["tg_id"], ("Вы заблокированы администратором" + (f": {reason}" if reason else "") + ".")
+                   if banned else "Администратор снял блокировку.", None))
+
+
+@api()
+def api_admin_ban(request, db, user, body, outbox, ctx):
+    if user["tg_id"] not in ADMIN_IDS:
+        raise ApiError(403, "Только для администратора")
+    u = user_by_pid(db, str(body.get("pid", "")))
+    if not u or uid_of(u) == uid_of(user):
+        raise ApiError(400, "Игрок не найден")
+    apply_ban(db, u, bool(body.get("ban")), clean_str(body.get("reason"), 200, "Причина"), outbox)
+    return {"message": "Игрок заблокирован" if body.get("ban") else "Блокировка снята"}
 
 
 @api()
@@ -1609,6 +1943,18 @@ async def api_top(_):
     return web.json_response(rows, headers=NOSTORE)
 
 
+async def api_public_profile(request):
+    """Профиль игрока из топа для тех, кто не вошёл: виден только если игрок есть в топе."""
+    pid = request.match_info["pid"]
+    async with lock:
+        db = db_load()
+        u = user_by_pid(db, pid)
+        st = top_stats(pid) if u else None
+    if not u or not st:
+        return web.json_response({"error": "Игрок не найден"}, status=404, headers=NOSTORE)
+    return web.json_response({**pub(u), "stats": st, "record": match_record(db, uid_of(u))}, headers=NOSTORE)
+
+
 async def health(_):
     return web.Response(text="ok")
 
@@ -1648,8 +1994,14 @@ async def main():
         web.post("/api/match/cancel", api_match_cancel),
         web.post("/api/match/report", api_match_report),
         web.post("/api/match/confirm", api_match_confirm),
+        web.post("/api/match/ban", api_match_ban),
+        web.post("/api/match/vote", api_match_vote),
+        web.get("/api/match/chat", api_match_chat_get),
+        web.post("/api/match/chat", api_match_chat_send),
+        web.post("/api/admin/ban", api_admin_ban),
         web.get("/api/shot/{mid:[0-9a-f]+}/{sid:[0-9a-f]+}", api_shot_get),
         web.get("/api/avatar/{pid:[0-9a-f]+}", api_avatar_get),
+        web.get("/api/public/{pid:[0-9a-f]+}", api_public_profile),
         web.post("/api/avatar/delete", api_avatar_delete),
     ])
     up = web.Application(client_max_size=MAX_SHOT + 4096)  # загрузка скриншотов, лимит только здесь
