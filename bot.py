@@ -25,6 +25,7 @@ import re
 import secrets
 import tempfile
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -50,7 +51,8 @@ AVATARS_DIR = Path(os.getenv("AVATARS_DIR", str(APP_FILE.parent / "avatars")))
 MAX_AVATAR = 2 * 1024 * 1024
 QUEUE_TTL = 3600           # поиск без матча сбрасывается через час
 MATCH_TTL = 6 * 3600       # активный матч без результата отменяется через 6 часов
-KEEP_DAYS = 3              # сколько хранить завершённые матчи и скриншоты
+KEEP_DAYS = 3              # сколько хранить скриншоты завершённых матчей
+HISTORY_DAYS = 90          # сколько хранить историю матчей (кто играл, результат)
 
 SIZES = (3, 4, 5)  # пати 3x3, 4x4, 5x5
 SESSION_TTL = 30 * 24 * 3600
@@ -310,10 +312,14 @@ def cleanup(db: dict) -> None:
     for mid, m in list(db["matches"].items()):
         if m["status"] == "active" and m["created"] < t - MATCH_TTL:
             m["status"], m["ended"] = "cancelled", int(t)
-        elif m["status"] in ("finished", "cancelled") and m.get("ended", 0) < t - KEEP_DAYS * 86400:
-            for sh in m["shots"]:
-                blob_del(f"shot/{mid}_{sh['id']}")
-            del db["matches"][mid]
+        elif m["status"] in ("finished", "cancelled"):
+            ended = m.get("ended", 0)
+            if m["shots"] and ended < t - KEEP_DAYS * 86400:  # скриншоты удаляем раньше самого матча
+                for sh in m["shots"]:
+                    blob_del(f"shot/{mid}_{sh['id']}")
+                m["shots"] = []
+            if ended < t - HISTORY_DAYS * 86400:
+                del db["matches"][mid]
 
 
 def ensure_user(db: dict, tg_id: int, username, first_name) -> dict:
@@ -782,16 +788,125 @@ async def cmd_import(m: Message, command: CommandObject):
     await m.answer(msg)
 
 
-@router.message(Command("matches"))
-async def cmd_matches(m: Message):
+MSK = timezone(timedelta(hours=3))
+STATUS_RU = {"active": "идёт", "disputed": "спорный", "finished": "завершён", "cancelled": "отменён"}
+
+
+def _dt(ts) -> str:
+    return datetime.fromtimestamp(ts, MSK).strftime("%d.%m %H:%M") if ts else "-"
+
+
+async def _send_long(m: Message, lines: list) -> None:
+    chunk = ""
+    for line in lines:
+        if len(chunk) + len(line) + 1 > 3800:
+            await m.answer(chunk)
+            chunk = ""
+        chunk += line + "\n"
+    if chunk:
+        await m.answer(chunk)
+
+
+@router.message(Command("admin"))
+async def cmd_admin(m: Message):
     if not is_admin(m):
         return await m.answer("Нет доступа.")
+    await m.answer(
+        "Команды администратора:\n"
+        "/users - кто зарегистрирован (/users 2 - вторая страница, /users ник - поиск)\n"
+        "/elo Ник ELO [K/D] [победы%] - добавить или обновить игрока в топе\n"
+        "/del Ник - убрать из топа\n"
+        "/import - заменить весь топ списком\n"
+        "/matches - последние матчи (/matches спор - только спорные)\n"
+        "/match ID - подробности матча и скриншоты\n"
+        "/winner ID 1|2 - решить спорный матч\n"
+        "/cancelmatch ID - отменить матч\n"
+        "/link Ник ID_в_игре - привязать аватарку к нику в топе\n"
+        "/resetid ID_в_игре - сбросить ID игрока")
+
+
+@router.message(Command("users"))
+async def cmd_users(m: Message, command: CommandObject):
+    if not is_admin(m):
+        return await m.answer("Нет доступа.")
+    arg = (command.args or "").strip()
+    page, q = 1, ""
+    if arg.isdigit() and int(arg) <= 99:
+        page = int(arg)
+    else:
+        q = arg.lower().lstrip("@")
+    async with lock:
+        db, top = db_load(), load()
+    users = sorted(db["users"].values(), key=lambda u: u.get("created", 0), reverse=True)  # новые сверху
+    if q:
+        users = [u for u in users if q in u["nick"].lower() or q in (u.get("tg_username") or "").lower()
+                 or q in (u.get("game_id") or "")]
+    if not users:
+        return await m.answer("Никого не нашёл." if q else "Пока никто не зарегистрировался.")
+    per = 40
+    pages = (len(users) + per - 1) // per
+    page = min(page, pages)
+    nicks = {p["nick"].lower() for p in top}
+    pids = {p["pid"] for p in top if p.get("pid")}
+    lines = [f"Зарегистрировано: {len(users)}" + (f" (страница {page}/{pages}, дальше: /users {page + 1})" if pages > 1 else "")]
+    for i, u in enumerate(users[(page - 1) * per:page * per], start=(page - 1) * per + 1):
+        in_top = u["nick"].lower() in nicks or u["pid"] in pids
+        lines.append(f"{i}. {u['nick']} | ID {u.get('game_id') or '-'} | {tg_tag(u)} | {'в топе' if in_top else 'не в топе'}")
+    lines.append("Добавить в топ: /elo Ник ELO [K/D] [победы%]. Метка «в топе» ставится, если такой ник есть в топе или он привязан через /link.")
+    await _send_long(m, lines)
+
+
+@router.message(Command("matches"))
+async def cmd_matches(m: Message, command: CommandObject):
+    if not is_admin(m):
+        return await m.answer("Нет доступа.")
+    a = (command.args or "").strip().lower()
+    want = next((k for k, v in STATUS_RU.items() if a and (k.startswith(a) or v.startswith(a))), None)
     async with lock:
         db = db_load()
-        rows = [x for x in db["matches"].values() if x["status"] in ("disputed", "active")]
+    rows = [x for x in db["matches"].values() if not want or x["status"] == want]
+    rows.sort(key=lambda x: x.get("created", 0), reverse=True)
     if not rows:
-        return await m.answer("Спорных и активных матчей нет.")
-    await m.answer("\n".join(f"{x['id']} - {x['status']} ({x['size']}x{x['size']})" for x in rows[:30]))
+        return await m.answer("Матчей нет." if not want else f"Матчей со статусом «{STATUS_RU[want]}» нет.")
+    lines = [f"Матчей: {len(rows)} (показаны последние {min(len(rows), 25)}). Подробности: /match ID"]
+    for x in rows[:25]:
+        res = ""
+        if x["status"] == "finished" and x.get("winner") is not None:
+            sc = (x.get("report") or {}).get("score")
+            res = f" | победила команда {x['winner'] + 1}" + (f", счёт {sc}" if sc else "")
+        lines.append(f"{x['id']} | {x['size']}x{x['size']} | {STATUS_RU.get(x['status'], x['status'])}{res} | {_dt(x.get('created'))}")
+    await _send_long(m, lines)
+
+
+@router.message(Command("match"))
+async def cmd_match(m: Message, command: CommandObject):
+    if not is_admin(m):
+        return await m.answer("Нет доступа.")
+    mid = (command.args or "").strip()
+    if not mid:
+        return await m.answer("Формат: /match ID (ID виден в списке /matches)")
+    async with lock:
+        db = db_load()
+        mt = db["matches"].get(mid)
+    if not mt:
+        return await m.answer(f"Матч не найден. История хранится {HISTORY_DAYS} дней.")
+    head = f"Матч {mt['id']} ({mt['size']}x{mt['size']}) - {STATUS_RU.get(mt['status'], mt['status'])}\nНачался: {_dt(mt.get('created'))}"
+    if mt.get("ended"):
+        head += f", закончился: {_dt(mt['ended'])}"
+    lines = [head]
+    for i, t in enumerate(mt["teams"]):
+        names = ", ".join(
+            f"{db['users'][u]['nick']}{' (кап.)' if u == t['captain'] else ''} [ID {db['users'][u].get('game_id') or '-'}]"
+            for u in t["members"] if u in db["users"])
+        won = " - победила" if mt["status"] == "finished" and mt.get("winner") == i else ""
+        lines.append(f"Команда {i + 1}{won}: {names}")
+    r = mt.get("report")
+    if r:
+        lines.append(f"Заявка капитана: победила команда {r.get('winner', 0) + 1}, счёт {r.get('score') or '-'}")
+    lines.append(f"Скриншотов: {len(mt['shots'])}" + ("" if mt["shots"] else f" (удаляются через {KEEP_DAYS} дн. после матча)"))
+    await _send_long(m, lines)
+    await flush([(m.from_user.id, f"Скриншот: команда {sh['team'] + 1}", None, f"shot/{mt['id']}_{sh['id']}")
+                 for sh in mt["shots"][:6]])
 
 
 async def _admin_finish(m: Message, command: CommandObject, cancel: bool):
