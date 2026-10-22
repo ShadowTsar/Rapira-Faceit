@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Rapira Faceit — Топ и подбор</title>
+<style>
+:root{--panel:#161618;--line:#2a2a2d;--text:#f3f3f3;--muted:#9a9a9f;--o1:#ff9a1f;--o2:#ff5a00;--row:#1b1b1e;--ok:#4cc56f;--bad:#ff5a5a;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:repeating-linear-gradient(135deg,#111 0 14px,#0b0b0c 14px 28px);color:var(--text);font-family:"Segoe UI",Roboto,Arial,sans-serif;min-height:100vh}
+.wrap{max-width:900px;margin:0 auto;padding:20px 14px 60px}
+h1{margin:0;font-style:italic;font-weight:900;font-size:clamp(34px,9vw,64px);line-height:.95}
+h1 .a{background:linear-gradient(#ffb23a,#ff5a00);-webkit-background-clip:text;background-clip:text;color:transparent;display:block}
+h1 .b{color:#fff;display:block;text-shadow:0 3px 0 #000}
+h2{margin:0 0 10px;font-size:19px}h3{margin:0 0 10px;font-size:16px}
+.sub{color:var(--muted);margin:12px 0 14px}.muted{color:var(--muted)}
+.top{display:flex;justify-content:space-between;align-items:flex-end;gap:12px;flex-wrap:wrap}
+nav{display:flex;gap:6px;margin:14px 0;flex-wrap:wrap}
+nav a{color:var(--muted);text-decoration:none;padding:8px 14px;border:1px solid var(--line);border-radius:8px;background:var(--panel);font-weight:600}
+nav a.on{color:#111;background:linear-gradient(#ff9a1f,#ff5a00);border-color:transparent}
+nav a:focus-visible,.btn:focus-visible{outline:2px solid var(--o1);outline-offset:2px}
+input,select,textarea{width:100%;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:10px 12px;font-size:15px;font-family:inherit}
+input[type=checkbox]{width:auto;accent-color:var(--o2)}
+textarea{resize:vertical}
+input:focus,select:focus,textarea:focus{outline:2px solid var(--o1)}
+#q{margin-bottom:12px}
+.box{background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--o2);border-radius:10px;overflow-x:auto}
+table{width:100%;border-collapse:collapse;min-width:460px}
+th,td{padding:11px 12px;text-align:left;white-space:nowrap}
+th{color:var(--muted);font-weight:600;font-size:13px;border-bottom:1px solid var(--line);cursor:pointer;user-select:none}
+th:hover{color:var(--o1)}
+tbody tr:nth-child(odd){background:var(--row)}
+td.rk{font-weight:800;width:52px;color:var(--muted)}
+tr.p1 td.rk{color:#ffc247}tr.p2 td.rk{color:#d6d6d6}tr.p3 td.rk{color:#d98a4b}
+td.nm{font-weight:700}td.elo{font-weight:800;color:var(--o1)}
+.lvl{display:inline-block;min-width:26px;text-align:center;padding:2px 7px;border-radius:6px;background:linear-gradient(#ff9a1f,#ff5a00);color:#111;font-weight:800;font-size:13px}
+.lvl.none{background:var(--line);color:var(--muted)}
+.card{background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--o2);border-radius:10px;padding:14px;margin-bottom:12px}
+.item .hd{display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:6px}
+.item .hd b{font-size:17px}
+.meta{color:var(--muted);font-size:14px;margin:4px 0}
