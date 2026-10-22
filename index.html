@@ -320,6 +320,7 @@ function drawFind(box,u,pd,friends){
   if(pd.last)box.appendChild(h("div",{class:"card"},h("span",{class:"meta",text:lastText(pd.last)})));
   box.appendChild(h("div",{class:"seg"},MODES.map(function(m){return h("button",{class:"btn"+(size===m[0]?"":" ghost"),text:m[1],disabled:!leader,onclick:function(){
     if(p)act("/api/party/size",{size:m[0]});else{LOBBY.size=m[0];renderFind()}}})})));
+  box.appendChild(h("p",{class:"meta",text:"Сейчас в поиске: "+MODES.map(function(m){return m[1]+" — "+((pd.modes||{})[m[0]]||0)}).join(" · ")}));
   var members=p?p.members:[{pid:u.pid,nick:u.nick,av:u.av||0,game_id:u.game_id||"",leader:true}],invited=p?p.invited:[];
   if(!u.game_id)box.appendChild(h("div",{class:"card"},h("p",{class:"meta",text:"Чтобы искать игру, укажите ID в игре. Он вводится один раз и навсегда."}),
     h("button",{class:"btn sm",type:"button",text:"Указать ID",onclick:function(){NEEDID=true;go("me")}})));

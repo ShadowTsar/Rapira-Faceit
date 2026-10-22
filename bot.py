@@ -965,7 +965,8 @@ def api_party(request, db, user, body, outbox, ctx):
                 res = "win" if mm.get("winner") == ti else "lose"
             last = {"status": mm["status"], "result": res}
             break
-    return {"party": party_view(db, p, me) if p else None, "invites": invites,
+    modes = {n: sum(len(x["members"]) for x in db["queue"].values() if x["size"] == n) for n in SIZES}
+    return {"party": party_view(db, p, me) if p else None, "invites": invites, "modes": modes,
             "queue": queue, "match": match_view(db, m, me) if m else None, "last": last}
 
 
