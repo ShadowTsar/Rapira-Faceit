@@ -98,7 +98,8 @@ button.pm:hover .plus,button.pm:focus-visible .plus{border-color:var(--o1);color
 .btn.big{display:block;width:100%;padding:15px;font-size:17px;border-radius:14px;margin:4px 0 18px}
 .mrow{display:flex;align-items:center;gap:10px;padding:8px 0;border-top:1px solid var(--line)}
 .mrow .mi{flex:1;min-width:0}
-.stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:10px 0;max-width:300px}
+.stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:10px 0;max-width:360px}
+td.duo{line-height:1.35}
 .stat{aspect-ratio:1/1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:6px;text-align:center}
 .stat b{display:block;font-size:24px;line-height:1.1}
 .stat span{font-size:11px;color:var(--muted)}
@@ -144,7 +145,7 @@ button.map:hover,button.map:focus-visible{border-color:var(--o1)}
     <p class="sub">Топ игроков FACEIT — рейтинг по ELO</p>
     <input id="q" type="search" placeholder="Поиск по нику" aria-label="Поиск по нику">
     <div class="box"><table>
-      <thead><tr><th data-k="rank">#</th><th data-k="nick">Игрок</th><th data-k="level">Уровень</th><th data-k="elo">ELO</th><th data-k="kd">K/D</th><th data-k="win">Победы</th></tr></thead>
+      <thead><tr><th data-k="rank">#</th><th data-k="nick">Игрок</th><th data-k="level">Уровень</th><th data-k="elo">ELO</th><th data-k="kills">Kill / Death</th><th data-k="wins">Win / Lose</th></tr></thead>
       <tbody id="tb"></tbody>
     </table></div>
   </section>
@@ -223,6 +224,7 @@ document.addEventListener("click",function(e){
 
 /* ---------- топ ---------- */
 var players=[],sk="rank",dir=1,tb=$("#tb"),q=$("#q");
+function cell2(tr,a,b){var td=document.createElement("td");td.className="duo";var x=document.createElement("div");x.textContent=a;var y=document.createElement("div");y.className="muted";y.textContent=b;td.appendChild(x);td.appendChild(y);tr.appendChild(td);return td}
 function cell(tr,text,cls){var td=document.createElement("td");if(cls)td.className=cls;td.textContent=text;tr.appendChild(td);return td}
 function renderTop(){
   var t=q.value.trim().toLowerCase();
@@ -234,7 +236,7 @@ function renderTop(){
     var tr=document.createElement("tr");if(p.rank<=3)tr.className="p"+p.rank;
     cell(tr,p.rank,"rk");var nt=cell(tr,"","nm");nt.appendChild(whoLink(p,30,function(){openTop(p)}));
     var l=cell(tr,"");var s=document.createElement("span");s.className="lvl";s.textContent=p.level;l.appendChild(s);
-    cell(tr,p.elo,"elo");cell(tr,Number(p.kd).toFixed(2));cell(tr,p.win+"%");
+    cell(tr,p.elo,"elo");cell2(tr,(p.kills||0)+" Kill",(p.deaths||0)+" Death");cell2(tr,(p.wins||0)+" Win",(p.losses||0)+" Lose");
     tb.appendChild(tr)});
 }
 function loadData(){fetch("/api/top",{cache:"no-store"}).then(function(r){return r.json()}).then(function(d){players=d;renderTop()}).catch(function(){})}
@@ -339,17 +341,17 @@ function whoLink(u,sz,fn){return h("a",{href:"#",class:"who lnk",onclick:functio
 function statsBlock(u,own){
   var s=u.stats,r=u.record,box=h("div");
   if(s){
-    box.appendChild(h("div",{class:"stats"},[["Место","№"+s.rank],["ELO",s.elo],["K/D",Number(s.kd).toFixed(2)],["Победы",s.win+"%"]].map(function(x){
+    box.appendChild(h("div",{class:"stats"},[["Место","№"+s.rank],["ELO",s.elo],["Kill",s.kills||0],["Death",s.deaths||0],["Win",s.wins||0],["Lose",s.losses||0]].map(function(x){
       return h("div",{class:"stat"},h("b",{text:String(x[1])}),h("span",{text:x[0]}))})));
     box.appendChild(h("div",{class:"meta"},h("span",{class:"lvl",text:s.level})," уровень"))}
   if(r&&r.games)box.appendChild(h("div",{class:"meta",text:"Матчей на сайте за 90 дней: "+r.games+" · побед: "+r.wins}));
-  if(!s&&own)box.appendChild(h("p",{class:"muted",text:"Статистики пока нет. ELO, K/D и победы начисляет администратор по скриншотам после ваших матчей."}));
+  if(!s&&own)box.appendChild(h("p",{class:"muted",text:"Статистики пока нет. ELO, Kill, Death, Win и Lose начисляет администратор по скриншотам после ваших матчей."}));
   return box}
 function openTop(p){
   if(p.pid)return showProfile(p.pid);
   var d=h("dialog");d.addEventListener("close",function(){d.remove()});
   d.appendChild(h("div",{class:"who",style:"gap:12px;margin-bottom:6px"},av(p,64),h("h3",{text:p.nick})));
-  d.appendChild(statsBlock({stats:{rank:p.rank,elo:p.elo,kd:p.kd,win:p.win,level:p.level}}));
+  d.appendChild(statsBlock({stats:{rank:p.rank,elo:p.elo,kills:p.kills,deaths:p.deaths,wins:p.wins,losses:p.losses,level:p.level}}));
   d.appendChild(h("p",{class:"muted",text:"Игрок ещё не зарегистрирован на сайте, поэтому другого профиля у него нет."}));
   d.appendChild(h("div",{class:"row"},h("button",{class:"btn ghost sm",text:"Закрыть",onclick:function(){d.close()}})));
   document.body.appendChild(d);d.showModal()}
@@ -517,7 +519,7 @@ function drawChat(box,m){
 function drawMatch(box,u,m){
   var cap=m.captain,mine=m.shots.filter(function(s){return s.team===m.team}).length,rep=m.report;
   box.appendChild(h("div",{class:"card"},h("h2",{text:"Матч "+m.size+"×"+m.size+" найден"}),
-    h("p",{class:"meta"},"Вы в команде "+(m.team+1)+", сторона: ",sideBadge(m.sides&&m.sides[m.team]),". Добавьте друг друга по ID в игре и соберите лобби. Капитан (👑) выбран случайно.")));
+    h("p",{class:"meta"},"Вы в команде "+(m.team+1)+", стартовая сторона: ",sideBadge(m.sides&&m.sides[m.team]),". После 8-го раунда стороны меняются. Добавьте друг друга по ID в игре и соберите лобби. Капитан (👑) выбран случайно.")));
   drawVeto(box,m);
   var teams=h("div",{class:"filters"});
   m.teams.forEach(function(t,i){

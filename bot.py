@@ -260,32 +260,19 @@ def level_of(elo: int) -> int:
     return 10
 
 
+STAT_KEYS = ("kills", "deaths", "wins", "losses")
+
+
 def ranked(data: list) -> list:
     rows = sorted(data, key=lambda p: p["elo"], reverse=True)[:TOP_N]
-    return [{**p, "rank": i, "level": level_of(p["elo"])}
-            for i, p in enumerate(rows, start=1)]
-
-
-def upsert(data: list, nick: str, elo: int, kd=None, win=None) -> None:
-    for p in data:
-        if p["nick"].lower() == nick.lower():
-            p["nick"], p["elo"] = nick, elo
-            if kd is not None:
-                p["kd"] = kd
-            if win is not None:
-                p["win"] = win
-            return
-    data.append({"nick": nick, "elo": elo,
-                 "kd": kd if kd is not None else 1.0,
-                 "win": win if win is not None else 50})
-
-
-def parse_parts(parts: list):
-    """ник ELO [K/D] [победы%] -> (nick, elo, kd, win)"""
-    nick, elo = parts[0][:32], int(parts[1])
-    kd = float(parts[2].replace(",", ".")) if len(parts) > 2 else None
-    win = int(parts[3]) if len(parts) > 3 else None
-    return nick, elo, kd, win
+    out = []
+    for i, p in enumerate(rows, start=1):
+        r = {k: v for k, v in p.items() if k not in ("kd", "win")}  # старые поля K/D и % побед больше не используются
+        for k in STAT_KEYS:
+            r[k] = int(p.get(k) or 0)
+        r.update(rank=i, level=level_of(p["elo"]))
+        out.append(r)
+    return out
 
 
 def is_admin(m: Message) -> bool:
@@ -377,11 +364,12 @@ def pub(u: dict) -> dict:
 
 
 def top_stats(pid: str):
-    """Место, ELO, K/D и победы игрока, если он есть в топе (привязан к профилю)."""
+    """Место, ELO, Kill, Death, Win и Lose игрока, если он есть в топе (привязан к профилю)."""
     r = next((x for x in ranked(load()) if x.get("pid") == pid), None)
     if not r:
         return None
-    return {"rank": r["rank"], "elo": r["elo"], "kd": r.get("kd", 0), "win": r.get("win", 0), "level": r["level"]}
+    return {"rank": r["rank"], "elo": r["elo"], "kills": r["kills"], "deaths": r["deaths"],
+            "wins": r["wins"], "losses": r["losses"], "level": r["level"]}
 
 
 def match_record(db, uid: str) -> dict:
@@ -619,11 +607,16 @@ def notify_admins_dispute(db, m, outbox):
         lines.append(f"Команда {i}: {names}")
     r = m.get("report") or {}
     lines.append(f"Заявлено: победила команда {r.get('winner', 0) + 1}, счёт {r.get('score') or '-'}")
-    lines.append(f"Решение: /winner {m['id']} 1  или  /winner {m['id']} 2\nОтмена: /cancelmatch {m['id']}")
+    lines.append(f"Решение: /winner {m['id']} CT или /winner {m['id']} T - какая сторона победила на ФИНАЛЬНОМ скрине "
+                 f"(стороны там уже поменяны)\nОтмена: /cancelmatch {m['id']}")
     for a in ADMIN_IDS:
         outbox.append((a, "\n".join(lines), None))
         for sh in m["shots"][:6]:
             outbox.append((a, f"Скриншот: команда {sh['team'] + 1}", None, f"shot/{m['id']}_{sh['id']}"))
+
+
+def other_side(sd: str) -> str:
+    return "T" if sd == "CT" else "CT"
 
 
 def match_view(db, m, me):
@@ -758,11 +751,13 @@ async def cmd_start(m: Message, command: CommandObject):
                  "/ban ID_или_@ник [причина], /unban, /banlist - блокировки\n"
                  "/users - зарегистрировались, но ещё не в топе\n"
                  "/userstop - игроки, которые уже в топе\n"
-                 "/stat ID_в_игре ELO [K/D] [победы] - начислить статистику (/stat ID +25 - прибавить ELO)\n"
+                 "/stat ID ELO [Kill] [Death] [Win] [Lose] - начислить статистику (со знаком + или - прибавляет)\n"
+                 "/season [ELO] [все] - новый сезон: сбросить ELO у всех в топе\n"
                  "/matches - последние матчи, /match ID - подробности и скриншоты\n"
-                 "/winner ID CT|T - победила сторона (CT = Counter-Terrorist, T = Terrorist)\n"
+                 "/winner ID CT|T - какая сторона победила на ФИНАЛЬНОМ скрине (стороны там уже поменяны)\n"
                  "/cancelmatch ID - отменить матч, даже уже засчитанный\n"
-                 "/ids - ID игроков на проверке, /verify ID - подтвердить ID вручную")
+                 "/ids - ID игроков на проверке, /verify ID - подтвердить ID вручную\n"
+                 "/broadcast Текст - рассылка всем игрокам (с предпросмотром)")
     kb = None
     if PUBLIC_URL.startswith("https://"):
         kb = InlineKeyboardMarkup(inline_keyboard=[[
@@ -872,12 +867,14 @@ async def cmd_admin(m: Message):
         "/users - зарегистрировались, но не в топе (/users 2 - страница, /users ник - поиск)\n"
         "/userstop - игроки в топе (/userstop 2 - страница, /userstop ник - поиск)\n"
         "/untop ID_или_@ник - убрать игрока из топа\n"
-        "/stat ID_в_игре ELO [K/D] [победы] - начислить статистику игроку, он попадёт в топ с профилем\n"
+        "/stat ID ELO [Kill] [Death] [Win] [Lose] - начислить статистику игроку, он попадёт в топ с профилем (+25 прибавляет)\n"
+        "/season [ELO] [все] - новый сезон: сбросить ELO у всех в топе (перед сбросом присылает текущий топ)\n"
         "/matches - последние матчи (/matches спор - только спорные)\n"
         "/match ID - подробности матча и скриншоты\n"
-        "/winner ID CT|T - засчитать победу стороны (CT = Counter-Terrorist, T = Terrorist), работает и для засчитанных\n"
+        "/winner ID CT|T - засчитать победу: CT или T = какая сторона победила на ФИНАЛЬНОМ скрине (стороны там уже поменяны), работает и для засчитанных\n"
         "/cancelmatch ID - отменить матч, даже уже засчитанный\n"
-        "/resetid ID_в_игре - сбросить ID игрока")
+        "/resetid ID_в_игре - сбросить ID игрока\n"
+        "/broadcast Текст - рассылка всем игрокам (с предпросмотром)")
 
 
 def _page_arg(arg: str):
@@ -914,7 +911,7 @@ async def cmd_users(m: Message, command: CommandObject):
     lines = [f"Зарегистрировались, но не в топе: {len(users)}" + (f" (страница {page}/{pages}, дальше: /users {page + 1})" if pages > 1 else "")]
     for i, u in enumerate(users[(page - 1) * per:page * per], start=(page - 1) * per + 1):
         lines.append(f"{i}. {u['nick']} | ID {u.get('game_id') or '-'} | {tg_tag(u)}")
-    lines.append("Добавить в топ: /stat ID_в_игре ELO [K/D] [победы%]. Кто уже в топе: /userstop")
+    lines.append("Добавить в топ: /stat ID_в_игре ELO. Кто уже в топе: /userstop")
     await _send_long(m, lines)
 
 
@@ -972,24 +969,30 @@ async def cmd_untop(m: Message, command: CommandObject):
     await m.answer(f"{name} убран из топа. Профиль и аккаунт на сайте остались.")
 
 
+def _apply_num(cur: int, token: str) -> int:
+    # "+10" или "-3" - прибавить или отнять, "10" - поставить значение
+    v = int(token)
+    return max(0, min(1_000_000, cur + v if token[0] in "+-" else v))
+
+
 @router.message(Command("stat"))
 async def cmd_stat(m: Message, command: CommandObject):
     # начисление после матча: игрок попадает в топ, и к его строке привязывается профиль
     if not is_admin(m):
         return await m.answer("Нет доступа.")
-    usage = ("Формат: /stat ID_в_игре ELO [K/D] [победы]\nПример: /stat 12345678 1500 1.35 56\n"
-             "Прибавить или отнять ELO: /stat 12345678 +25  или  /stat 12345678 -20")
+    usage = ("Формат: /stat ID_в_игре ELO [Kill] [Death] [Win] [Lose]\n"
+             "Поставить значения: /stat 12345678 1500 120 95 14 9\n"
+             "Прибавить после матча: /stat 12345678 +25 +10 +8 +1 +0\n"
+             "Знак + или - прибавляет или отнимает, число без знака ставит значение. "
+             "Показатель, который не нужно менять, просто не пишите (с конца).")
     parts = (command.args or "").split()
-    try:
-        delta = parts[1][0] in "+-"
-        val = int(parts[1])
-        kd = float(parts[2].replace(",", ".")) if len(parts) > 2 else None
-        win = int(parts[3]) if len(parts) > 3 else None
-    except (ValueError, IndexError):
+    if len(parts) < 2 or len(parts) > 6:
         return await m.answer(usage)
-    if (kd is not None and not 0 <= kd <= 20) or (win is not None and not 0 <= win <= 100):
-        return await m.answer("K/D должен быть от 0 до 20, победы от 0 до 100.")
-    outbox = []
+    try:
+        for t in parts[1:]:
+            int(t)
+    except ValueError:
+        return await m.answer(usage)
     async with lock:
         db, data = db_load(), load()
         u = find_user(db, parts[0])
@@ -1003,24 +1006,81 @@ async def cmd_stat(m: Message, command: CommandObject):
             elif same:
                 return await m.answer(f"В топе уже есть другой игрок с ником {same['nick']}. Сначала уберите его командой /untop ID_в_игре")
         if row is None:
-            if delta:
+            if parts[1][0] in "+-":
                 return await m.answer("Игрока ещё нет в топе, укажите ELO числом без знака: /stat ID 1000")
-            row = {"nick": u["nick"], "elo": val, "kd": 1.0, "win": 50}
+            row = {"nick": u["nick"], "elo": 0}
             data.append(row)
-        elif delta:
-            row["elo"] = max(0, row["elo"] + val)
-        else:
-            row["elo"] = max(0, val)
-        if kd is not None:
-            row["kd"] = kd
-        if win is not None:
-            row["win"] = win
+        row.pop("kd", None)
+        row.pop("win", None)
+        row["elo"] = _apply_num(row.get("elo", 0), parts[1])
+        for k, token in zip(STAT_KEYS, parts[2:]):
+            row[k] = _apply_num(int(row.get(k) or 0), token)
+        for k in STAT_KEYS:
+            row[k] = int(row.get(k) or 0)
         row["pid"] = u["pid"]
         save(data)
-        res = f"ELO {row['elo']}, K/D {float(row['kd']):.2f}, победы {row['win']}%"
-        outbox.append((u["tg_id"], f"Вам начислена статистика: {res}. Ваш профиль в топе: {PUBLIC_URL or 'на сайте'}", None))
+        res = f"ELO {row['elo']}, Kill {row['kills']}, Death {row['deaths']}, Win {row['wins']}, Lose {row['losses']}"
+        outbox = [(u["tg_id"], f"Вам начислена статистика: {res}. Ваш профиль в топе: {PUBLIC_URL or 'на сайте'}", None)]
     await m.answer(f"Готово: {u['nick']} (ID {u.get('game_id') or '-'}) - {res}. Профиль привязан к топу.")
     await flush(outbox)
+
+
+# ---------- новый сезон: сброс ELO у всех в топе ----------
+PENDING_SEASON: dict = {}
+
+
+@router.message(Command("season"))
+async def cmd_season(m: Message, command: CommandObject):
+    if not is_admin(m):
+        return await m.answer("Нет доступа.")
+    parts = (command.args or "").lower().split()
+    wipe = any(p in ("все", "всё", "all") for p in parts)
+    nums = [p for p in parts if p.lstrip("+-").isdigit()]
+    if len(parts) != len(nums) + (1 if wipe else 0) or len(nums) > 1 or (nums and nums[0][0] in "+-"):
+        return await m.answer("Формат: /season [ELO] [все]\nНапример: /season 0 - сбросить ELO у всех в топе до 0 "
+                              "(Kill, Death, Win, Lose остаются).\n/season 1000 все - до 1000 и обнулить ещё Kill, Death, Win, Lose.")
+    elo = int(nums[0]) if nums else 0
+    async with lock:
+        n = len(load())
+    if not n:
+        return await m.answer("В топе пока никого нет.")
+    PENDING_SEASON[m.from_user.id] = (elo, wipe)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=f"Сбросить ({n})", callback_data="ss:go"),
+        InlineKeyboardButton(text="Отмена", callback_data="ss:no")]])
+    await m.answer(f"Новый сезон: ELO у всех {n} игроков в топе станет {elo}"
+                   + (", а Kill, Death, Win и Lose обнулятся" if wipe else " (Kill, Death, Win и Lose останутся)")
+                   + ".\nПеред сбросом пришлю текущий топ, чтобы он сохранился у вас в чате. Сбросить?", reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("ss:"))
+async def cb_season(c: CallbackQuery):
+    if c.from_user.id not in ADMIN_IDS:
+        return await c.answer("Только для администратора", show_alert=True)
+    pend = PENDING_SEASON.pop(c.from_user.id, None)
+    try:
+        await c.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    if c.data != "ss:go" or not pend:
+        return await c.answer("Сброс отменён" if c.data != "ss:go" else "Запрос устарел, повторите /season", show_alert=True)
+    elo, wipe = pend
+    await c.answer("Сбрасываю…")
+    async with lock:
+        data = load()
+        old = ranked(data)
+        for row in data:
+            row["elo"] = elo
+            if wipe:
+                for k in STAT_KEYS:
+                    row[k] = 0
+        save(data)
+    lines = [f"Топ до сброса ({datetime.now(MSK).strftime('%d.%m.%Y')}), игроков: {len(old)}"]
+    lines += [f"{r['rank']}. {r['nick']} | ELO {r['elo']} | Kill {r['kills']} Death {r['deaths']} | Win {r['wins']} Lose {r['losses']}"
+              for r in old]
+    await _send_long(c.message, lines)
+    await c.message.answer(f"Готово: ELO у {len(old)} игроков теперь {elo}" + (", статистика обнулена." if wipe else ".")
+                           + " Сообщить игрокам о новом сезоне можно через /broadcast.")
 
 
 @router.message(Command("matches"))
@@ -1072,19 +1132,20 @@ async def cmd_match(m: Message, command: CommandObject):
         lines.append(f"Заявка капитана: победила команда {r.get('winner', 0) + 1}, счёт {r.get('score') or '-'}")
     lines.append(f"Скриншотов: {len(mt['shots'])}" + ("" if mt["shots"] else f" (удаляются через {KEEP_DAYS} дн. после матча)"))
     if mt.get("sides"):
-        lines.append("Стороны: " + ", ".join(f"команда {i + 1} - {sd}" for i, sd in enumerate(mt["sides"])))
+        lines.append("Стартовые стороны: " + ", ".join(f"команда {i + 1} - {sd}" for i, sd in enumerate(mt["sides"]))
+                     + " (на финальном скрине наоборот)")
     lines.append(f"Результат: /winner {mt['id']} CT|T, отменить: /cancelmatch {mt['id']}")
-    lines.append("Начислить статистику игроку: /stat ID_в_игре ELO K/D победы")
+    lines.append("Начислить статистику игроку: /stat ID_в_игре ELO Kill Death Win Lose")
     await _send_long(m, lines)
     await flush([(m.from_user.id, f"Скриншот: команда {sh['team'] + 1}", None, f"shot/{mt['id']}_{sh['id']}")
                  for sh in mt["shots"][:6]])
 
 
 def _side_team(mt, token: str):
-    """CT/T (сторона в этом матче) или 1/2 (номер команды) -> индекс команды."""
+    """CT/T - сторона, победившая на ФИНАЛЬНОМ скриншоте (там стороны уже поменяны), или 1/2 - номер команды."""
     t = token.upper()
-    if t in ("CT", "T") and mt.get("sides") and t in mt["sides"]:
-        return mt["sides"].index(t)
+    if t in ("CT", "T") and mt.get("sides") and other_side(t) in mt["sides"]:
+        return mt["sides"].index(other_side(t))  # победила команда, которая стартовала за противоположную сторону
     if t in ("1", "2"):
         return int(t) - 1
     return None
@@ -1092,7 +1153,7 @@ def _side_team(mt, token: str):
 
 def _team_label(mt, i: int) -> str:
     sd = (mt.get("sides") or [None, None])[i]
-    return f"команда {i + 1}" + (f" ({sd} - {SIDE_NAME[sd]})" if sd else "")
+    return f"команда {i + 1}" + (f" (стартовала за {sd})" if sd else "")
 
 
 @router.message(Command("winner"))
@@ -1101,8 +1162,10 @@ async def cmd_winner(m: Message, command: CommandObject):
         return await m.answer("Нет доступа.")
     parts = (command.args or "").split()
     if len(parts) < 2:
-        return await m.answer("Формат: /winner ID_матча CT или T\nCT - победила сторона Counter-Terrorist, "
-                              "T - сторона Terrorist (стороны видны в /match ID).\nМожно и по номеру: /winner ID 1 или 2.")
+        return await m.answer("Формат: /winner ID_матча CT или T\n"
+                              "CT или T - какая сторона ПОБЕДИЛА НА ФИНАЛЬНОМ СКРИНШОТЕ. На скрине стороны уже поменяны "
+                              "(после 8-го раунда), поэтому победа CT на скрине = победа команды, стартовавшей за T. "
+                              "Бот сам определяет команду.\nМожно и по номеру команды: /winner ID 1 или 2.")
     outbox = []
     async with lock:
         db = db_load()
@@ -1227,6 +1290,54 @@ async def cmd_banlist(m: Message):
         rows = [u for u in db_load()["users"].values() if u.get("banned")]
     await m.answer("\n".join(f"{u['nick']} (ID {u.get('game_id') or '-'}){': ' + u['ban_reason'] if u.get('ban_reason') else ''}"
                              for u in rows[:50]) or "Заблокированных нет.")
+
+
+PENDING_BC: dict = {}
+
+
+@router.message(Command("broadcast"))
+async def cmd_broadcast(m: Message, command: CommandObject):
+    # рассылка всем зарегистрированным: сначала предпросмотр, отправка только после нажатия кнопки
+    if not is_admin(m):
+        return await m.answer("Нет доступа.")
+    text = (command.args or "").strip()
+    if not text:
+        return await m.answer("Формат: /broadcast Текст сообщения\nПример: /broadcast Бот снова работает, можно искать игру!")
+    if len(text) > 3500:
+        return await m.answer("Слишком длинный текст, сократите до 3500 символов.")
+    async with lock:
+        n = sum(1 for u in db_load()["users"].values() if not u.get("banned"))
+    PENDING_BC[m.from_user.id] = text
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=f"Отправить ({n})", callback_data="bc:go"),
+        InlineKeyboardButton(text="Отмена", callback_data="bc:no")]])
+    await m.answer("Предпросмотр рассылки:\n\n" + text, reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("bc:"))
+async def cb_broadcast(c: CallbackQuery):
+    if c.from_user.id not in ADMIN_IDS:
+        return await c.answer("Только для администратора", show_alert=True)
+    text = PENDING_BC.pop(c.from_user.id, None)
+    try:
+        await c.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    if c.data != "bc:go" or not text:
+        return await c.answer("Рассылка отменена" if c.data != "bc:go" else "Текст устарел, повторите /broadcast", show_alert=True)
+    await c.answer("Отправляю…")
+    async with lock:
+        ids = [u["tg_id"] for u in db_load()["users"].values() if not u.get("banned")]
+    ok = fail = 0
+    for tid in ids:
+        try:
+            await bot.send_message(tid, text)
+            ok += 1
+        except Exception:
+            fail += 1
+        await asyncio.sleep(0.05)  # укладываемся в лимиты Telegram
+    await c.message.answer(f"Рассылка завершена: доставлено {ok}, не доставлено {fail} "
+                           "(человек не запускал бота или заблокировал его).")
 
 
 # ---------- API сайта ----------
