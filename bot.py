@@ -307,6 +307,10 @@ def cleanup(db: dict) -> bool:
     for k in [k for k, v in db["queue"].items()
               if v["joined"] < t - QUEUE_TTL or v.get("seen", v["joined"]) < t - STALE_DROP]:
         del db["queue"][k]
+    for bu in db["users"].values():
+        if bu.get("banned") and bu.get("ban_until") and bu["ban_until"] <= t:
+            bu["banned"], bu["ban_reason"], bu["ban_until"] = False, "", 0
+            changed = True
     for mid, m in list(db["matches"].items()):
         if m["status"] == "active" and m["created"] < t - MATCH_TTL:
             m["status"], m["ended"] = "cancelled", int(t)
@@ -399,6 +403,33 @@ def find_user(db, key: str):
     hits = [x for x in db["users"].values()
             if x["nick"].lower() == k.lower() or (x.get("tg_username") or "").lower() == k.lower()]
     return hits[0] if len(hits) == 1 else None
+
+
+ONLINE_SEC = 120  # «в сети» = сайт делал запрос за последние 2 минуты
+LAST_SEEN = {}    # uid -> время последнего запроса с сайта (только в памяти: запись в базу на каждый опрос не даёт Neon уснуть)
+
+
+def seen_ts(u) -> float:
+    return max(LAST_SEEN.get(uid_of(u), 0), u.get("seen_at", 0) or 0)
+
+
+def is_online(u) -> bool:
+    return time.time() - seen_ts(u) < ONLINE_SEC
+
+
+def presence(u) -> dict:
+    ts = seen_ts(u)
+    return {"online": time.time() - ts < ONLINE_SEC, "seen": int(ts)}
+
+
+def real_party_of(db, uid):
+    """Пати, где есть хотя бы двое. Лобби из одного владельца занятостью не считается."""
+    p = party_of(db, uid)
+    return p if p and len(p["members"]) > 1 else None
+
+
+def pinvite_msg(owner, p) -> str:
+    return f"{owner['nick']} зовёт вас в пати {p['size']}x{p['size']} ({len(p['members'])}/{p['size']})"
 
 
 def are_friends(db, a, b) -> bool:
@@ -600,13 +631,14 @@ def end_match(db, m, status, outbox, text, winner=None):
 
 
 def notify_admins_dispute(db, m, outbox):
-    lines = [f"Спорный матч {m['id']} ({m['size']}x{m['size']})"]
+    lines = [f"{'Матч на проверку' if m.get('review') else 'Спорный матч'} {m['id']} ({m['size']}x{m['size']})"]
     for i, t in enumerate(m["teams"], start=1):
         names = ", ".join(db["users"][u]["nick"] + (" (кап.)" if u == t["captain"] else "")
                           for u in t["members"] if u in db["users"])
         lines.append(f"Команда {i}: {names}")
     r = m.get("report") or {}
-    lines.append(f"Заявлено: победила команда {r.get('winner', 0) + 1}, счёт {r.get('score') or '-'}")
+    who = f" капитаном команды {r['team'] + 1}" if "team" in r else ""
+    lines.append(f"Заявлено{who}: победила команда {r.get('winner', 0) + 1}, счёт {r.get('score') or '-'}")
     lines.append(f"Решение: /winner {m['id']} CT или /winner {m['id']} T - какая сторона победила на ФИНАЛЬНОМ скрине "
                  f"(стороны там уже поменяны)\nОтмена: /cancelmatch {m['id']}")
     for a in ADMIN_IDS:
@@ -689,10 +721,13 @@ def resolve_pinvite(db, iid, actor, accept, outbox) -> str:
         if owner:
             outbox.append((owner["tg_id"], f"{actor['nick']} отклонил приглашение в пати.", None))
         return "Приглашение отклонено"
-    if party_of(db, me):
+    mp = party_of(db, me)
+    if mp and len(mp["members"]) > 1:
         raise ApiError(400, "Вы уже в пати - сначала выйдите из неё")
     if queue_of(db, me):
         raise ApiError(400, "Сначала отмените поиск игры")
+    if mp:  # своё лобби без других игроков закрываем, чтобы принять приглашение
+        drop_party(db, mp)
     if party_in_queue(db, p):
         raise ApiError(400, "Эта пати уже ищет игру")
     if len(p["members"]) >= p["size"]:
@@ -747,12 +782,12 @@ async def cmd_start(m: Message, command: CommandObject):
     if is_admin(m):
         text += ("\n\nКоманды админа:\n"
                  "/untop ID_или_@ник - убрать игрока из топа\n"
-                 "/resetid ID_в_игре - сбросить ID игрока (если ошибся)\n"
-                 "/ban ID_или_@ник [причина], /unban, /banlist - блокировки\n"
+                 "/resetid ID_или_ник - сбросить ID игрока (снимает с поиска и отменяет его матч, даже если он в сети)\n"
+                 "/ban ID_или_@ник [срок] [причина] - блокировка (срок: 30м, 1ч, 1д; без срока навсегда), /unban, /banlist\n"
                  "/users - зарегистрировались, но ещё не в топе\n"
                  "/userstop - игроки, которые уже в топе\n"
                  "/stat ID ELO [Kill] [Death] [Win] [Lose] - начислить статистику (со знаком + или - прибавляет)\n"
-                 "/season [ELO] [все] - новый сезон: сбросить ELO у всех в топе\n"
+                 "/season [ELO] [все] - новый сезон: ELO у всех в топе станет 300 (или число, которое укажете)\n"
                  "/matches - последние матчи, /match ID - подробности и скриншоты\n"
                  "/winner ID CT|T - какая сторона победила на ФИНАЛЬНОМ скрине (стороны там уже поменяны)\n"
                  "/cancelmatch ID - отменить матч, даже уже засчитанный\n"
@@ -868,12 +903,12 @@ async def cmd_admin(m: Message):
         "/userstop - игроки в топе (/userstop 2 - страница, /userstop ник - поиск)\n"
         "/untop ID_или_@ник - убрать игрока из топа\n"
         "/stat ID ELO [Kill] [Death] [Win] [Lose] - начислить статистику игроку, он попадёт в топ с профилем (+25 прибавляет)\n"
-        "/season [ELO] [все] - новый сезон: сбросить ELO у всех в топе (перед сбросом присылает текущий топ)\n"
+        "/season [ELO] [все] - новый сезон: ELO у всех в топе станет 300, можно указать своё число (перед сбросом присылает текущий топ)\n"
         "/matches - последние матчи (/matches спор - только спорные)\n"
         "/match ID - подробности матча и скриншоты\n"
         "/winner ID CT|T - засчитать победу: CT или T = какая сторона победила на ФИНАЛЬНОМ скрине (стороны там уже поменяны), работает и для засчитанных\n"
         "/cancelmatch ID - отменить матч, даже уже засчитанный\n"
-        "/resetid ID_в_игре - сбросить ID игрока\n"
+        "/resetid ID_или_ник - сбросить ID игрока (снимает с поиска и отменяет его матч, даже если он в сети)\n"
         "/broadcast Текст - рассылка всем игрокам (с предпросмотром)")
 
 
@@ -1029,6 +1064,9 @@ async def cmd_stat(m: Message, command: CommandObject):
 PENDING_SEASON: dict = {}
 
 
+SEASON_ELO = 300  # куда сбрасывается ELO, если число не указано
+
+
 @router.message(Command("season"))
 async def cmd_season(m: Message, command: CommandObject):
     if not is_admin(m):
@@ -1037,9 +1075,10 @@ async def cmd_season(m: Message, command: CommandObject):
     wipe = any(p in ("все", "всё", "all") for p in parts)
     nums = [p for p in parts if p.lstrip("+-").isdigit()]
     if len(parts) != len(nums) + (1 if wipe else 0) or len(nums) > 1 or (nums and nums[0][0] in "+-"):
-        return await m.answer("Формат: /season [ELO] [все]\nНапример: /season 0 - сбросить ELO у всех в топе до 0 "
-                              "(Kill, Death, Win, Lose остаются).\n/season 1000 все - до 1000 и обнулить ещё Kill, Death, Win, Lose.")
-    elo = int(nums[0]) if nums else 0
+        return await m.answer("Формат: /season [ELO] [все]\nНапример: /season - ELO у всех в топе станет "
+                              f"{SEASON_ELO} (Kill, Death, Win, Lose остаются).\n/season 500 - до 500.\n"
+                              f"/season все - до {SEASON_ELO} и обнулить ещё Kill, Death, Win, Lose.")
+    elo = int(nums[0]) if nums else SEASON_ELO
     async with lock:
         n = len(load())
     if not n:
@@ -1214,23 +1253,37 @@ async def cmd_cancelmatch(m: Message, command: CommandObject):
 
 @router.message(Command("resetid"))
 async def cmd_resetid(m: Message, command: CommandObject):
-    # сброс ID в игре (если игрок ошибся): /resetid ID_в_игре
+    # сброс ID в игре (если игрок ошибся): /resetid ID_в_игре. Работает и когда игрок в сети, в поиске или в матче
     if not is_admin(m):
         return await m.answer("Нет доступа.")
-    gid = (command.args or "").strip()
-    if not gid:
-        return await m.answer("Формат: /resetid ID_в_игре")
+    key = (command.args or "").strip()
+    if not key:
+        return await m.answer("Формат: /resetid ID_в_игре (можно ник или @username)")
+    outbox, notes = [], []
     async with lock:
         db = db_load()
-        u = next((x for x in db["users"].values() if (x.get("game_id") or "") == gid), None)
+        u = find_user(db, key)
         if not u:
-            return await m.answer("Игрок с таким ID не найден.")
-        if queue_of(db, uid_of(u)) or match_of(db, uid_of(u)):
-            return await m.answer("Игрок сейчас в поиске или матче, попробуйте позже.")
+            return await m.answer("Игрок не найден. Укажите ID в игре, ник или @username.")
+        if not (u.get("game_id") or u.get("id_status")):
+            return await m.answer(f"У {u['nick']} ID и так не указан.")
+        t = queue_of(db, uid_of(u))
+        if t:  # искать игру без проверенного ID нельзя: снимаем заявку и предупреждаем остальных
+            del db["queue"][t["id"]]
+            notes.append("поиск игры отменён")
+            for mem in t["members"]:
+                mu = db["users"].get(mem)
+                if mu and mem != uid_of(u):
+                    outbox.append((mu["tg_id"], f"Поиск игры отменён: у игрока {u['nick']} сбросили ID. Запустите поиск заново.", None))
+        mt = match_of(db, uid_of(u))
+        if mt:  # без проверенного ID играть нельзя: матч отменяется, все участники получат сообщение
+            end_match(db, mt, "cancelled", outbox, f"Матч отменён: администратор сбросил ID у игрока {u['nick']}.")
+            notes.append("матч отменён")
         u["game_id"], u["id_status"], u["id_note"] = "", "", ""
         db_save(db)
-    await m.answer(f"ID сброшен у {u['nick']}.")
-    await flush([(u["tg_id"], "Администратор сбросил ваш ID в игре. Укажите правильный ID в профиле и отправьте скриншот на проверку.", None)])
+    outbox.append((u["tg_id"], "Администратор сбросил ваш ID в игре. Укажите правильный ID в профиле и отправьте скриншот на проверку.", None))
+    await m.answer(f"ID сброшен у {u['nick']}" + (f" ({', '.join(notes)})" if notes else "") + ".")
+    await flush(outbox)
 
 
 @router.message(Command("queue"))
@@ -1256,7 +1309,8 @@ async def _ban_cmd(m: Message, command: CommandObject, ban: bool):
         return await m.answer("Нет доступа.")
     parts = (command.args or "").split(maxsplit=1)
     if not parts:
-        return await m.answer("Формат: /ban ID_в_игре или @username [причина]" if ban
+        return await m.answer("Формат: /ban ID_в_игре или @username [срок] [причина]\nСрок: 30м, 1ч, 2ч, 1д. Без срока бан навсегда, пока не снимете /unban.\n"
+                              "Например: /ban Ник 1ч вышел из матча" if ban
                               else "Формат: /unban ID_в_игре или @username")
     outbox = []
     async with lock:
@@ -1266,9 +1320,10 @@ async def _ban_cmd(m: Message, command: CommandObject, ban: bool):
             return await m.answer("Игрок не найден.")
         if u["tg_id"] in ADMIN_IDS:
             return await m.answer("Администратора заблокировать нельзя.")
-        apply_ban(db, u, ban, parts[1] if len(parts) > 1 else "", outbox)
+        sec, reason = parse_duration(parts[1]) if ban and len(parts) > 1 else (0, "")
+        apply_ban(db, u, ban, reason.strip(), outbox, until=time.time() + sec if sec else 0)
         db_save(db)
-    await m.answer(f"{'Заблокирован' if ban else 'Разблокирован'}: {u['nick']}")
+    await m.answer(f"{'Заблокирован' + (' на ' + fmt_dur(sec) if sec else ' без срока') if ban else 'Разблокирован'}: {u['nick']}")
     await flush(outbox)
 
 
@@ -1288,7 +1343,7 @@ async def cmd_banlist(m: Message):
         return await m.answer("Нет доступа.")
     async with lock:
         rows = [u for u in db_load()["users"].values() if u.get("banned")]
-    await m.answer("\n".join(f"{u['nick']} (ID {u.get('game_id') or '-'}){': ' + u['ban_reason'] if u.get('ban_reason') else ''}"
+    await m.answer("\n".join(f"{u['nick']} (ID {u.get('game_id') or '-'}){': ' + u['ban_reason'] if u.get('ban_reason') else ''}{ban_left(u)}"
                              for u in rows[:50]) or "Заблокированных нет.")
 
 
@@ -1361,11 +1416,15 @@ def api(auth: bool = True):
                     db = db_load()
                     changed = cleanup(db)
                     user = session_user(db, request)
+                    if user is not None:
+                        LAST_SEEN[uid_of(user)] = time.time()
                     if auth and user is None:
                         raise ApiError(401, "Нужен вход через Telegram")
                     ctx = {"dirty": request.method == "POST" or bool(changed)}
                     res = fn(request, db, user, body, outbox, ctx)
                     if ctx["dirty"]:
+                        if user is not None:
+                            user["seen_at"] = int(time.time())
                         db_save(db)
             except ApiError as e:
                 return web.json_response({"error": e.msg}, status=e.status, headers=NOSTORE)
@@ -1434,6 +1493,7 @@ def api_me(request, db, user, body, outbox, ctx):
     uid = uid_of(user)
     return {"user": {**pub(user), "tg": user.get("tg_username", ""), "admin": user["tg_id"] in ADMIN_IDS,
                      "banned": bool(user.get("banned")), "id_status": id_state(user),
+                     "ban_left": max(0, int(user.get("ban_until", 0) - time.time())) if user.get("banned") else 0,
                      "id_note": user.get("id_note", "")}, "cfg": cfg,
             "badges": {"friends": sum(1 for r in db["freqs"].values() if r["to"] == uid),
                        "party": sum(1 for i in db["pinvites"].values() if i["to"] == uid)}}
@@ -1459,7 +1519,7 @@ def api_users(request, db, user, body, outbox, ctx):
             continue
         if q in u["nick"].lower() or q == (u.get("game_id") or "").lower() or q in (u.get("tg_username") or "").lower():
             rel, rid = relation(db, me, uid)
-            rows.append({**pub(u), "relation": rel, "req_id": rid})
+            rows.append({**pub(u), **presence(u), "relation": rel, "req_id": rid})
     return rows[:15]
 
 
@@ -1469,7 +1529,7 @@ def api_user(request, db, user, body, outbox, ctx):
     if not u:
         raise ApiError(404, "Игрок не найден")
     rel, rid = relation(db, uid_of(user), uid_of(u))
-    d = {**pub(u), "relation": rel, "req_id": rid,
+    d = {**pub(u), **presence(u), "relation": rel, "req_id": rid,
          "friends_count": len(db["friends"].get(uid_of(u), []))}
     if rel in ("friend", "self") and u.get("tg_username"):
         d["tg"] = u["tg_username"]  # Telegram виден только друзьям
@@ -1492,8 +1552,8 @@ def api_friends(request, db, user, body, outbox, ctx):
     for f in db["friends"].get(me, []):
         fu = db["users"].get(f)
         if fu:
-            friends.append({**pub(fu), "in_party": party_of(db, f) is not None, "invited": f in invited})
-    friends.sort(key=lambda x: x["nick"].lower())
+            friends.append({**pub(fu), **presence(fu), "in_party": real_party_of(db, f) is not None, "invited": f in invited})
+    friends.sort(key=lambda x: (not x["online"], x["nick"].lower()))
     inc = [{"id": r["id"], "user": pub(db["users"][r["from"]])}
            for r in db["freqs"].values() if r["to"] == me and r["from"] in db["users"]]
     out = [{"id": r["id"], "user": pub(db["users"][r["to"]])}
@@ -1586,11 +1646,42 @@ def api_party(request, db, user, body, outbox, ctx):
             res = None
             if mm["status"] == "finished":
                 res = "win" if mm.get("winner") == ti else "lose"
-            last = {"status": mm["status"], "result": res}
+            last = {"status": mm["status"], "result": res, "review": bool(mm.get("review"))}
             break
     modes = {n: sum(len(x["members"]) for x in db["queue"].values() if x["size"] == n and is_fresh(x)) for n in SIZES}
     return {"party": party_view(db, p, me) if p else None, "invites": invites, "modes": modes,
             "queue": queue, "match": match_view(db, m, me) if m else None, "last": last}
+
+
+def nudge_invites(db, outbox) -> bool:
+    changed = False
+    for i in db["pinvites"].values():
+        if i.get("tg", True) or time.time() - i.get("created", 0) < 45:
+            continue
+        t, p = db["users"].get(i["to"]), db["parties"].get(i["party"])
+        if not t or not p or is_online(t):
+            continue
+        owner = db["users"].get(p["owner"])
+        if owner:
+            outbox.append((t["tg_id"], pinvite_msg(owner, p), accept_kb("pi", i["id"])))
+        i["tg"], changed = True, True
+    return changed
+
+
+async def invite_nudger():
+    while True:
+        await asyncio.sleep(30)
+        outbox = []
+        try:
+            async with lock:
+                db = db_load()
+                if nudge_invites(db, outbox):
+                    db_save(db)
+            await flush(outbox)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logging.exception("invite_nudger")
 
 
 def _size(v):
@@ -1615,7 +1706,7 @@ def api_party_invite(request, db, user, body, outbox, ctx):
         raise ApiError(400, "Сначала отмените поиск игры")
     if p and p["owner"] != me:
         raise ApiError(403, "Приглашает только лидер пати")
-    if party_of(db, tid):
+    if real_party_of(db, tid):
         raise ApiError(400, "Этот игрок уже в пати")
     if p and any(i["to"] == tid for i in pending_invites(db, p["id"])):
         raise ApiError(400, "Приглашение уже отправлено")
@@ -1627,10 +1718,11 @@ def api_party_invite(request, db, user, body, outbox, ctx):
         pid = secrets.token_hex(4)
         p = db["parties"][pid] = {"id": pid, "owner": me, "size": size, "members": [me]}
     iid = secrets.token_hex(4)
-    db["pinvites"][iid] = {"id": iid, "party": p["id"], "to": tid}
-    outbox.append((target["tg_id"], f"{user['nick']} зовёт вас в пати {p['size']}x{p['size']} "
-                                    f"({len(p['members'])}/{p['size']})", accept_kb("pi", iid)))
-    return {"message": "Приглашение отправлено"}
+    online = is_online(target)  # в сети: увидит на сайте; не в сети: сообщение в Telegram
+    db["pinvites"][iid] = {"id": iid, "party": p["id"], "to": tid, "created": time.time(), "tg": not online}
+    if not online:
+        outbox.append((target["tg_id"], pinvite_msg(user, p), accept_kb("pi", iid)))
+    return {"message": "Приглашение отправлено на сайт" if online else "Приглашение отправлено в Telegram"}
 
 
 @api()
@@ -1718,7 +1810,7 @@ def api_queue_start(request, db, user, body, outbox, ctx):
         bu = db["users"].get(m, {})
         if bu.get("banned"):
             raise ApiError(403, ("Вы заблокированы администратором" if m == me else f"Игрок {bu.get('nick')} заблокирован")
-                           + (f": {bu['ban_reason']}" if bu.get("ban_reason") else ""))
+                           + (f": {bu['ban_reason']}" if bu.get("ban_reason") else "") + ban_left(bu))
     for m in members:
         mu = db["users"].get(m, {})
         if id_state(mu) != "ok":
@@ -1819,13 +1911,55 @@ def api_match_chat_send(request, db, user, body, outbox, ctx):
     return {"ok": True}
 
 
-def apply_ban(db, u, banned: bool, reason: str, outbox) -> None:
-    u["banned"], u["ban_reason"] = banned, (reason[:200] if banned else "")
+def fmt_dur(sec: int) -> str:
+    if sec % 86400 == 0:
+        return f"{sec // 86400} д"
+    if sec % 3600 == 0:
+        return f"{sec // 3600} ч"
+    return f"{max(1, sec // 60)} мин"
+
+
+def ban_left(u) -> str:
+    left = int(u.get("ban_until", 0) - time.time())
+    return f" (осталось {fmt_dur(((left + 59) // 60) * 60)})" if u.get("banned") and left > 0 else ""
+
+
+_DUR = re.compile(r"(\d{1,3})\s*(мин|м|min|m|часа|час|ч|h|дней|дня|день|дн|д|d)(?![a-zа-я])\s*", re.I)
+
+
+def parse_duration(text: str):
+    """'1ч вышел из матча' -> (3600, 'вышел из матча'); без срока -> (0, text), то есть бан без срока."""
+    mt = _DUR.match(text)
+    if not mt:
+        return 0, text
+    unit = mt.group(2).lower()
+    mult = 60 if unit in ("мин", "м", "min", "m") else 3600 if unit in ("часа", "час", "ч", "h") else 86400
+    sec = min(int(mt.group(1)) * mult, 30 * 86400)
+    return (sec, text[mt.end():]) if sec > 0 else (0, text)
+
+
+def apply_ban(db, u, banned: bool, reason: str, outbox, until: float = 0) -> None:
+    u["banned"], u["ban_reason"], u["ban_until"] = banned, (reason[:200] if banned else ""), (until if banned else 0)
     if banned:
-        t = queue_of(db, uid_of(u))
+        uid = uid_of(u)
+        t = queue_of(db, uid)
         if t:
             del db["queue"][t["id"]]
-    outbox.append((u["tg_id"], ("Вы заблокированы администратором" + (f": {reason}" if reason else "") + ".")
+        mt = match_of(db, uid)
+        if mt:  # игрок в матче: матч отменяется, все участники получат сообщение
+            end_match(db, mt, "cancelled", outbox, f"Матч отменён: игрок {u['nick']} заблокирован администратором.")
+        pt = party_of(db, uid)
+        if pt:
+            pt["members"].remove(uid)
+            if not pt["members"]:
+                drop_party(db, pt)
+            elif pt["owner"] == uid:
+                pt["owner"] = pt["members"][0]
+        for k in [k for k, v in db["pinvites"].items() if v["to"] == uid]:
+            del db["pinvites"][k]
+    dur = int(round((until - time.time()) / 60)) * 60 if banned and until else 0
+    outbox.append((u["tg_id"], ("Вы заблокированы администратором" + (f" на {fmt_dur(dur)}" if dur > 0 else "")
+                                + (f": {reason}" if reason else "") + ".")
                    if banned else "Администратор снял блокировку.", None))
 
 
@@ -1867,19 +2001,17 @@ def api_match_report(request, db, user, body, outbox, ctx):
         raise ApiError(403, "Результат отправляет капитан команды")
     if not any(x["team"] == ti for x in m["shots"]):
         raise ApiError(400, "Сначала прикрепите скриншот результата")
-    rep = m.get("report")
-    if rep and rep["team"] != ti:
-        raise ApiError(400, "Соперники уже отправили результат: подтвердите или оспорьте его")
     w = body.get("winner")
     if w not in ("me", "enemy"):
         raise ApiError(400, "Укажите, кто победил")
-    m["report"] = {"team": ti, "winner": ti if w == "me" else 1 - ti,
-                   "score": clean_str(body.get("score"), 10, "Счёт"), "ts": int(time.time())}
-    other = db["users"].get(m["teams"][1 - ti]["captain"])
-    if other:
-        outbox.append((other["tg_id"], "Капитан соперников отправил результат матча. "
-                       "Откройте комнату, проверьте скриншот и подтвердите или оспорьте.", room_kb()))
-    return {"message": "Результат отправлен капитану соперников"}
+    score = clean_str(body.get("score"), 10, "Счёт")
+    win = ti if w == "me" else 1 - ti
+    m["report"] = {"team": ti, "winner": win, "score": score, "ts": int(time.time())}
+    m["review"] = True  # на проверке у админов; капитан соперников подтверждать ничего не должен
+    end_match(db, m, "disputed", outbox, f"Капитан команды {ti + 1} отправил результат: победила команда {win + 1}"
+              + (f", счёт {score}" if score else "") + ". Администратор проверит скриншот и засчитает матч.")
+    notify_admins_dispute(db, m, outbox)
+    return {"message": "Результат отправлен администратору на проверку"}
 
 
 @api()
@@ -2220,9 +2352,11 @@ async def main():
 
     dp = Dispatcher()
     dp.include_router(router)
+    nudger = asyncio.create_task(invite_nudger())
     try:
         await dp.start_polling(bot)
     finally:
+        nudger.cancel()
         await store_flush()  # дописать последние изменения в базу
 
 

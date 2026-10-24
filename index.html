@@ -98,11 +98,22 @@ button.pm:hover .plus,button.pm:focus-visible .plus{border-color:var(--o1);color
 .btn.big{display:block;width:100%;padding:15px;font-size:17px;border-radius:14px;margin:4px 0 18px}
 .mrow{display:flex;align-items:center;gap:10px;padding:8px 0;border-top:1px solid var(--line)}
 .mrow .mi{flex:1;min-width:0}
-.stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:10px 0;max-width:360px}
+.stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:10px 0;max-width:360px}
 td.duo{line-height:1.35}
 .stat{aspect-ratio:1/1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:6px;text-align:center}
 .stat b{display:block;font-size:24px;line-height:1.1}
 .stat span{font-size:11px;color:var(--muted)}
+.stat.wide{grid-column:1/-1;aspect-ratio:auto;padding:12px 8px}.stat.wide b{font-size:19px;line-height:1.35}
+.pres{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--muted);white-space:nowrap}.pres i{width:8px;height:8px;border-radius:50%;background:#666;display:inline-block}.pres.on{color:var(--ok)}.pres.on i{background:var(--ok);box-shadow:0 0 6px var(--ok)}
+.srch{text-align:center;padding:22px 14px}.srch h2{margin:0 0 6px}
+.radar{position:relative;width:96px;height:96px;margin:4px auto 14px}
+.radar i{position:absolute;inset:0;border:2px solid var(--o1);border-radius:50%;opacity:0}
+.radar b{position:absolute;inset:28px;border-radius:50%;background:linear-gradient(#ff9a1f,#ff5a00);display:flex;align-items:center;justify-content:center;font-size:20px}
+.srch .tm{font-size:40px;font-weight:900;font-variant-numeric:tabular-nums;line-height:1.1}
+.srch .bar{height:8px;border-radius:8px;background:var(--row);overflow:hidden;margin:14px auto 8px;max-width:360px}.srch .bar i{display:block;height:100%;background:linear-gradient(90deg,#ff9a1f,#ff5a00);transition:width .4s}
+.dots{display:flex;justify-content:center;gap:6px;flex-wrap:wrap;margin:10px 0}.dots i{width:12px;height:12px;border-radius:50%;background:var(--row);border:1px solid var(--line)}.dots i.f{background:var(--o1);border-color:var(--o1)}
+.srch .chips{justify-content:center}.srch .row{justify-content:center}
+@media(prefers-reduced-motion:no-preference){.radar i{animation:rad 2.4s ease-out infinite}.radar i+i{animation-delay:1.2s}@keyframes rad{0%{transform:scale(.45);opacity:.8}100%{transform:scale(1.1);opacity:0}}}
 a.who{color:var(--text);text-decoration:none;font-weight:700}
 .pm a.pi{color:var(--o1);text-decoration:none}
 .mrow .gid{color:var(--muted);font-size:13px}
@@ -145,7 +156,7 @@ button.map:hover,button.map:focus-visible{border-color:var(--o1)}
     <p class="sub">Топ игроков FACEIT — рейтинг по ELO</p>
     <input id="q" type="search" placeholder="Поиск по нику" aria-label="Поиск по нику">
     <div class="box"><table>
-      <thead><tr><th data-k="rank">#</th><th data-k="nick">Игрок</th><th data-k="level">Уровень</th><th data-k="elo">ELO</th><th data-k="kills">Kill / Death</th><th data-k="wins">Win / Lose</th></tr></thead>
+      <thead><tr><th data-k="rank">#</th><th data-k="nick">Игрок</th><th data-k="level">Уровень</th><th data-k="elo">ELO</th><th data-k="kills">Kill / Death<br>Win / Lose</th></tr></thead>
       <tbody id="tb"></tbody>
     </table></div>
   </section>
@@ -224,19 +235,19 @@ document.addEventListener("click",function(e){
 
 /* ---------- топ ---------- */
 var players=[],sk="rank",dir=1,tb=$("#tb"),q=$("#q");
-function cell2(tr,a,b){var td=document.createElement("td");td.className="duo";var x=document.createElement("div");x.textContent=a;var y=document.createElement("div");y.className="muted";y.textContent=b;td.appendChild(x);td.appendChild(y);tr.appendChild(td);return td}
+function cellStat(tr,p){var td=document.createElement("td");td.className="duo";var x=document.createElement("div");x.textContent=(p.kills||0)+" Kill / "+(p.deaths||0)+" Death";var y=document.createElement("div");y.className="muted";y.textContent=(p.wins||0)+" Win / "+(p.losses||0)+" Lose";td.appendChild(x);td.appendChild(y);tr.appendChild(td);return td}
 function cell(tr,text,cls){var td=document.createElement("td");if(cls)td.className=cls;td.textContent=text;tr.appendChild(td);return td}
 function renderTop(){
   var t=q.value.trim().toLowerCase();
   var list=players.filter(function(p){return p.nick.toLowerCase().indexOf(t)>-1});
   list.sort(function(a,b){var x=a[sk],y=b[sk];return(x>y?1:x<y?-1:0)*dir});
   tb.textContent="";
-  if(!list.length){var r=document.createElement("tr");var td=cell(r,players.length?"Ничего не найдено.":"Таблица пока пуста.");td.colSpan=6;tb.appendChild(r);return}
+  if(!list.length){var r=document.createElement("tr");var td=cell(r,players.length?"Ничего не найдено.":"Таблица пока пуста.");td.colSpan=5;tb.appendChild(r);return}
   list.forEach(function(p){
     var tr=document.createElement("tr");if(p.rank<=3)tr.className="p"+p.rank;
     cell(tr,p.rank,"rk");var nt=cell(tr,"","nm");nt.appendChild(whoLink(p,30,function(){openTop(p)}));
     var l=cell(tr,"");var s=document.createElement("span");s.className="lvl";s.textContent=p.level;l.appendChild(s);
-    cell(tr,p.elo,"elo");cell2(tr,(p.kills||0)+" Kill",(p.deaths||0)+" Death");cell2(tr,(p.wins||0)+" Win",(p.losses||0)+" Lose");
+    cell(tr,p.elo,"elo");cellStat(tr,p);
     tb.appendChild(tr)});
 }
 function loadData(){fetch("/api/top",{cache:"no-store"}).then(function(r){return r.json()}).then(function(d){players=d;renderTop()}).catch(function(){})}
@@ -336,13 +347,18 @@ function idRow(gid){
   return h("div",{class:"meta"},"Ваш ID в игре: ",h("b",{text:gid})," ",
     h("button",{class:"btn ghost sm",type:"button",text:"Копировать",onclick:function(){
       copyText(gid).then(function(){toast("ID скопирован")}).catch(function(){toast("Не удалось скопировать, выделите ID вручную",true)})}}))}
+function ago(ts){var m=Math.max(1,Math.round((Date.now()/1000-ts)/60));return m<60?m+" мин назад":m<1440?Math.round(m/60)+" ч назад":Math.round(m/1440)+" дн назад"}
+function presEl(u,indent){if(!u||u.online===undefined)return null;
+  var e=h("span",{class:"pres"+(u.online?" on":"")},h("i"),u.online?"в сети":(u.seen?"не в сети · был(а) "+ago(u.seen):"не в сети"));
+  if(indent)e.style.cssText="margin:2px 0 0 "+indent+"px";return e}
 function nickLink(u){return h("a",{href:"#",class:"lnk",text:u.nick,onclick:function(e){e.preventDefault();showProfile(u.pid)}})}
 function whoLink(u,sz,fn){return h("a",{href:"#",class:"who lnk",onclick:function(e){e.preventDefault();fn?fn():showProfile(u.pid)}},av(u,sz),h("span",{text:u.nick}))}
 function statsBlock(u,own){
   var s=u.stats,r=u.record,box=h("div");
   if(s){
-    box.appendChild(h("div",{class:"stats"},[["Место","№"+s.rank],["ELO",s.elo],["Kill",s.kills||0],["Death",s.deaths||0],["Win",s.wins||0],["Lose",s.losses||0]].map(function(x){
-      return h("div",{class:"stat"},h("b",{text:String(x[1])}),h("span",{text:x[0]}))})));
+    box.appendChild(h("div",{class:"stats"},[["Место","№"+s.rank],["ELO",s.elo]].map(function(x){
+      return h("div",{class:"stat"},h("b",{text:String(x[1])}),h("span",{text:x[0]}))}),
+      h("div",{class:"stat wide"},h("b",{text:(s.kills||0)+" Kill / "+(s.deaths||0)+" Death"}),h("b",{text:(s.wins||0)+" Win / "+(s.losses||0)+" Lose"}))));
     box.appendChild(h("div",{class:"meta"},h("span",{class:"lvl",text:s.level})," уровень"))}
   if(r&&r.games)box.appendChild(h("div",{class:"meta",text:"Матчей на сайте за 90 дней: "+r.games+" · побед: "+r.wins}));
   if(!s&&own)box.appendChild(h("p",{class:"muted",text:"Статистики пока нет. ELO, Kill, Death, Win и Lose начисляет администратор по скриншотам после ваших матчей."}));
@@ -360,6 +376,7 @@ function showProfile(pid){
     var d=h("dialog");d.addEventListener("close",function(){d.remove()});
     function run(path,body){call(path,body).then(function(r){toast(r.message||"Готово");d.close();route()}).catch(function(e){toast(e.message,true)})}
     d.appendChild(h("div",{class:"who",style:"gap:12px;margin-bottom:6px"},av(u,64),h("h3",{text:u.nick})));
+    var pe=presEl(u);if(pe)d.appendChild(h("div",{class:"meta"},pe));
     d.appendChild(h("div",{class:"meta",text:"ID в игре: "+(u.game_id||"не указан")}));
     if(u.about)d.appendChild(h("p",{class:"meta",text:u.about}));
     d.appendChild(statsBlock(u,false));
@@ -404,8 +421,14 @@ setInterval(function(){
   if(!SEARCHING||CUR==="find"||!(S.me&&S.me.user))return;
   call("/api/party").then(function(d){
     if(d.match){SEARCHING=false;toast("Матч найден!");go("find")}else if(!d.queue)SEARCHING=false}).catch(function(){})},10000);
+setInterval(function(){
+  if(!TOKEN||document.hidden||!(S.me&&S.me.user))return;
+  var o=S.me.badges||{friends:0,party:0};
+  loadMe().then(function(){var n=S.me.badges||{friends:0,party:0},dlg=document.querySelector("dialog[open]");
+    if(n.party>o.party){toast("Вас зовут в пати: откройте «Подбор»");if(CUR==="find"&&!BUSY&&!dlg)renderFind(true)}
+    else if(n.friends>o.friends){toast("Новая заявка в друзья");if(CUR==="friends"&&!dlg)renderFriends()}}).catch(function(){})},30000);
 function fmtEl(s){var m=Math.floor(s/60);return m+":"+("0"+(s%60)).slice(-2)}
-function lastText(l){return "Последний матч: "+(l.status==="finished"?(l.result==="win"?"победа 🏆":"поражение"):l.status==="cancelled"?"отменён":"результат оспорен, решит администратор")}
+function lastText(l){return "Последний матч: "+(l.status==="finished"?(l.result==="win"?"победа 🏆":"поражение"):l.status==="cancelled"?"отменён":l.review?"результат отправлен на проверку, ждите решения администратора":"результат оспорен, решит администратор")}
 function drawFind(box,u,pd,friends){
   if(pd.match)return drawMatch(box,u,pd.match);
   if(pd.queue)return drawSearching(box,pd);
@@ -416,7 +439,7 @@ function drawFind(box,u,pd,friends){
         h("button",{class:"btn ghost sm",text:"Отклонить",onclick:function(){act("/api/pinvites/"+i.id+"/decline",{})}}),
         h("button",{class:"btn ghost sm",text:"Профиль",onclick:function(){showProfile(i.from.pid)}}))))});
   if(pd.last)box.appendChild(h("div",{class:"card"},h("span",{class:"meta",text:lastText(pd.last)})));
-  if(u.banned)box.appendChild(h("div",{class:"card"},h("b",{class:"bad",text:"Вы заблокированы администратором"}),h("p",{class:"meta",text:"Поиск игры недоступен. Если это ошибка, напишите администратору."})));
+  if(u.banned)box.appendChild(h("div",{class:"card"},h("b",{class:"bad",text:"Вы заблокированы администратором"}),h("p",{class:"meta",text:(u.ban_left>0?"Бан закончится через "+Math.ceil(u.ban_left/60)+" мин. ":"")+"Поиск игры недоступен. Если это ошибка, напишите администратору."})));
   box.appendChild(h("div",{class:"seg"},MODES.map(function(m){return h("button",{class:"btn"+(size===m[0]?"":" ghost"),text:m[1],disabled:!leader,onclick:function(){
     if(p)act("/api/party/size",{size:m[0]});else{LOBBY.size=m[0];renderFind()}}})})));
   box.appendChild(h("p",{class:"meta",text:"Сейчас в поиске: "+MODES.map(function(m){return m[1]+" — "+((pd.modes||{})[m[0]]||0)}).join(" · ")}));
@@ -443,10 +466,16 @@ function drawFind(box,u,pd,friends){
   if(p)box.appendChild(h("div",{class:"row"},h("button",{class:"btn danger sm",text:"Выйти из пати",onclick:function(){act("/api/party/leave",{},"Вы вышли из пати")}})));
   box.appendChild(h("p",{class:"meta",text:"Не хватает игроков? Система найдёт остальных. Друзья из вашей пати всегда окажутся в одной команде."}))}
 function drawSearching(box,pd){
-  var q=pd.queue,p=pd.party;
-  var c=h("div",{class:"card"},h("h2",{text:"🔍 Ищем игру "+q.size+"×"+q.size}),
-    h("p",{class:"meta",text:"В поиске: "+q.waiting+" из "+q.need+" игроков · ищем уже "+fmtEl(q.elapsed)}),
-    h("p",{class:"meta",text:"Когда игроков хватит, откроется комната со всеми участниками матча."}));
+  var q=pd.queue,p=pd.party,pct=Math.min(100,Math.round(q.waiting*100/q.need));
+  var tm=h("div",{class:"tm",text:fmtEl(q.elapsed)}),t0=Date.now()-q.elapsed*1000;
+  var iv=setInterval(function(){if(!document.body.contains(tm)){clearInterval(iv);return}tm.textContent=fmtEl(Math.floor((Date.now()-t0)/1000))},1000);
+  var dots=h("div",{class:"dots","aria-hidden":"true"});for(var i=0;i<q.need;i++)dots.appendChild(h("i",{class:i<q.waiting?"f":""}));
+  var c=h("div",{class:"card srch"},
+    h("div",{class:"radar","aria-hidden":"true"},h("i"),h("i"),h("b",{text:"🔍"})),
+    h("h2",{text:"Ищем игру "+q.size+"×"+q.size}),tm,
+    h("div",{class:"bar",role:"progressbar","aria-valuemin":0,"aria-valuemax":q.need,"aria-valuenow":q.waiting},h("i",{style:"width:"+pct+"%"})),
+    h("div",{class:"meta",text:"Найдено игроков: "+q.waiting+" из "+q.need}),dots,
+    h("p",{class:"meta",text:"Когда игроков хватит, откроется комната матча со всеми участниками."}));
   if(p)c.appendChild(h("div",{class:"chips"},p.members.map(function(m){return h("a",{href:"#",class:"chip who lnk",onclick:function(e){e.preventDefault();showProfile(m.pid)}},av(m,20),m.nick)})));
   c.appendChild(h("div",{class:"row"},q.can_cancel?h("button",{class:"btn danger",text:"Отменить поиск",onclick:function(){act("/api/queue/cancel",{},"Поиск отменён")}}):h("span",{class:"muted",text:"Поиск отменяет лидер пати"})));
   box.appendChild(c)}
@@ -535,7 +564,8 @@ function drawMatch(box,u,m){
     teams.appendChild(c)});
   box.appendChild(teams);
   drawChat(box,m);
-  var res=h("div",{class:"card"},h("h3",{text:"Результат матча"}));
+  var res=h("div",{class:"card"},h("h3",{text:"Результат матча"}),
+    h("p",{class:"meta bad",text:"⚠️ Не выходите из игры в конце матча, пока капитан не сделал скриншот финального счёта. Если игрок выйдет раньше, матч будет отменён, а вышедший получит бан на поиск игр на 1 час."}));
   if(m.shots.length){m.shots.forEach(function(s){res.appendChild(h("div",{class:"meta",text:"Скриншот · команда "+(s.team+1)}));res.appendChild(shotImg(m.id,s.id))})}
   else res.appendChild(h("p",{class:"muted",text:"Скриншотов пока нет. После игры капитан прикрепляет скриншот результата."}));
   if(rep&&rep.team!==m.team){
@@ -544,7 +574,7 @@ function drawMatch(box,u,m){
       h("button",{class:"btn danger",text:"Оспорить",onclick:function(){if(confirm("Оспорить результат? Скриншоты уйдут администратору."))act("/api/match/confirm",{accept:false})}})));
     else res.appendChild(h("p",{class:"muted",text:"Подтверждает или оспаривает капитан вашей команды."}))}
   else if(rep)res.appendChild(h("p",{class:"meta",text:"Результат отправлен: победила команда "+(rep.winner+1)+(rep.score?", счёт "+rep.score:"")+". Ждём подтверждения капитана соперников."}));
-  if(cap&&!(rep&&rep.team!==m.team)){
+  if(cap){
     var inp=h("input",{type:"file",accept:"image/png,image/jpeg,image/webp","aria-label":"Скриншот результата"});
     inp.addEventListener("change",function(){var f=inp.files[0];if(!f)return;
       BUSY=true;toast("Загружаю скриншот…");
@@ -555,8 +585,8 @@ function drawMatch(box,u,m){
     var win=h("select",{"aria-label":"Кто победил"},h("option",{value:"me",text:"Мы победили"}),h("option",{value:"enemy",text:"Победили соперники"}));
     var sc=h("input",{maxlength:10,placeholder:"Счёт, например 13:9","aria-label":"Счёт"});
     res.appendChild(h("div",{class:"form"},h("label",{},h("span",{text:"Прикрепить скриншот результата (сожмётся автоматически)"}),inp),
-      h("div",{class:"two"},win,sc),
-      h("div",{class:"row"},h("button",{class:"btn",text:"Отправить результат",disabled:!mine,onclick:function(){act("/api/match/report",{winner:win.value,score:sc.value})}}),
+      h("div",{class:"two"},win,sc),h("p",{class:"meta",text:"Результат уходит администратору на проверку. Капитану соперников подтверждать ничего не нужно."}),
+      h("div",{class:"row"},h("button",{class:"btn",text:"Отправить на проверку",disabled:!mine,onclick:function(){if(confirm("Отправить результат администратору? Изменить его после отправки нельзя."))act("/api/match/report",{winner:win.value,score:sc.value})}}),
         mine?null:h("span",{class:"muted",text:"Сначала прикрепите скриншот"}))))}
   box.appendChild(res);
   var cc=h("div",{class:"card"},h("h3",{text:"Отмена матча"}));
@@ -571,16 +601,17 @@ function drawMatch(box,u,m){
 function pickFriend(friends,size){
   var d=h("dialog");d.addEventListener("close",function(){d.remove()});
   d.appendChild(h("h3",{text:"Позвать друга в пати"}));
-  var free=friends.filter(function(f){return !f.in_party&&!f.invited});
+  var free=friends.filter(function(f){return !f.in_party&&!f.invited}).sort(function(a,b){return (b.online?1:0)-(a.online?1:0)});
   if(!free.length)d.appendChild(h("p",{class:"muted",text:friends.length?"Все друзья сейчас в пати или уже приглашены.":"Друзей пока нет."}));
-  free.forEach(function(f){d.appendChild(h("div",{class:"mem"},h("span",{class:"nm"},whoLink(f,32)),
+  else d.appendChild(h("p",{class:"meta",text:"Друг в сети увидит приглашение на сайте, друг не в сети получит его сообщением в Telegram."}));
+  free.forEach(function(f){d.appendChild(h("div",{class:"mem"},h("span",{class:"nm"},whoLink(f,32),presEl(f,40)),
     h("button",{class:"btn sm",text:"Пригласить",onclick:function(){d.close();act("/api/party/invite",{pid:f.pid,size:size},"Приглашение отправлено")}})))});
   d.appendChild(h("div",{class:"row"},h("a",{class:"btn ghost sm",href:"#friends",text:"Найти друзей",onclick:function(){d.close()}}),
     h("button",{class:"btn ghost sm",text:"Закрыть",onclick:function(){d.close()}})));
   document.body.appendChild(d);d.showModal()}
 
 /* ---------- друзья ---------- */
-function personRow(u,btns){return h("div",{class:"mem"},h("span",{class:"nm"},whoLink(u,38)),u.game_id?h("span",{class:"muted",text:"ID: "+u.game_id}):null,
+function personRow(u,btns){return h("div",{class:"mem"},h("span",{class:"nm"},whoLink(u,38),presEl(u,46)),u.game_id?h("span",{class:"muted",text:"ID: "+u.game_id}):null,
   h("button",{class:"btn ghost sm",type:"button",text:"Профиль",onclick:function(){showProfile(u.pid)}}),btns)}
 function renderFriends(){
   var box=$("#t-friends");clear(box);
