@@ -69,6 +69,7 @@ HISTORY_DAYS = 90          # сколько хранить историю мат
 ELO_TIERS = ((3, 35, 15), (6, 30, 20), (9, 25, 25), (10, 20, 30))
 # В 4x4 и 5x5 растянуто: к победе прибавляется, а к поражению добавляется столько же (поражение становится больнее).
 ELO_STRETCH = {3: 0, 4: 10, 5: 20}
+REF_ELO = 30       # награда пригласившему за нового друга
 START_ELO = 1000  # с чего начинает игрок, которого ещё нет в таблице
 SIZES = (3, 4, 5)  # пати 3x3, 4x4, 5x5
 SESSION_TTL = 30 * 24 * 3600
@@ -298,7 +299,7 @@ class ApiError(Exception):
 
 def db_load() -> dict:
     d = copy.deepcopy(_cache.get("app") or {})  # копия: если запрос упадёт, кэш не испортится
-    for k in ("users", "sessions", "codes", "friends", "freqs", "parties", "pinvites", "queue", "matches"):
+    for k in ("users", "sessions", "codes", "friends", "freqs", "parties", "pinvites", "queue", "matches", "settings"):
         d.setdefault(k, {})
     return d
 
@@ -663,6 +664,34 @@ def drop_games(db, u, outbox, why: str) -> list:
     return notes
 
 
+def award_ref(inv: dict) -> int:
+    """+REF_ELO пригласившему (строка в таблице создаётся, если её ещё нет). Возвращает его новое ELO."""
+    data = load()
+    r = next((x for x in data if x.get("pid") == inv["pid"]), None)
+    if r is None:
+        r = {"nick": inv["nick"], "elo": START_ELO, "pid": inv["pid"]}
+        for k in STAT_KEYS:
+            r[k] = 0
+        data.append(r)
+    r["elo"] = int(r["elo"]) + REF_ELO
+    save(data)
+    return r["elo"]
+
+
+def pay_ref(db, u, outbox) -> None:
+    """Когда ID приглашённого подтверждён - платим пригласившему +REF_ELO (один раз за друга)."""
+    inv = db["users"].get(u.get("ref_by", ""))
+    if not inv or u.get("ref_paid") or inv.get("banned"):
+        return
+    gid = u.get("game_id")
+    if gid and any(x is not u and x.get("ref_paid") and x.get("game_id") == gid for x in db["users"].values()):
+        return  # этот игровой ID уже приносил награду (защита от лишних аккаунтов)
+    u["ref_paid"] = True
+    inv["ref_count"] = inv.get("ref_count", 0) + 1
+    new_elo = award_ref(inv)
+    outbox.append((inv["tg_id"], f"Ваш друг {u['nick']} подтвердил ID в игре: +{REF_ELO} ELO (теперь {new_elo}).", None))
+
+
 def cd_left(u) -> int:
     """Секунд до конца запрета на поиск (за выход из матча)."""
     return max(0, int(u.get("cd_until", 0) - time.time()))
@@ -870,13 +899,29 @@ async def cmd_start(m: Message, command: CommandObject):
             InlineKeyboardButton(text="Отмена", callback_data=f"auth:no:{code}")]])
         return await m.answer("Вход на сайт Rapira Faceit.\nЕсли вы сами нажали «Войти через Telegram» "
                               "- подтвердите. Если нет - нажмите «Отмена».", reply_markup=kb)
+    if arg.startswith("ref_"):
+        outbox = []
+        async with lock:
+            db = db_load()
+            inv_uid, me_uid = arg[4:], str(m.from_user.id)
+            inv = db["users"].get(inv_uid)
+            # работает только для тех, у кого бота ещё нет (нет аккаунта), и только пока админ включил рефералку
+            if (db["settings"].get("referral") and inv and not inv.get("banned")
+                    and inv_uid != me_uid and me_uid not in db["users"]):
+                u = ensure_user(db, m.from_user.id, m.from_user.username, m.from_user.first_name)
+                u["ref_by"] = inv_uid
+                db_save(db)
+                outbox.append((inv["tg_id"], f"Ваш друг {u['nick']} впервые открыл бота по вашей ссылке. "
+                               f"+{REF_ELO} ELO придёт, когда его ID в игре будет подтверждён.", None))
+        await flush(outbox)
     text = ("Топ игроков FACEIT.\n/top - топ-10\n/profile - ваш профиль и пати\n"
             f"Ваш Telegram ID: {m.from_user.id}")
     if is_admin(m):
         text += ("\n\nКоманды админа:\n"
                  "/untop ID_или_@ник - убрать игрока из топа\n"
                  "/resetid ID_или_ник - сбросить ID игрока (снимает с поиска и отменяет его матч, даже если он в сети)\n"
-                 "/leaver ID_или_ник [30м|1ч] - вышел из матча раньше времени: матч отменяется, поиск закрыт (по умолчанию 1ч), /unleaver - снять\n"
+                 "/leaver ID_или_ник [30м|1ч] - вышел из матча раньше времени: матч отменяется, поиск закрыт (по умолчанию 1ч), /unleaver - снять\n"                 "/referral on|off - включить или убрать вкладку «Пригласить друга» на сайте (+30 ELO, когда ID нового игрока подтвердят)\n"
+
                  "/ban ID_или_@ник [срок] [причина] - блокировка (срок: 30м, 1ч, 1д; без срока навсегда), /unban, /banlist\n"
                  "/users - зарегистрировались, но ещё не в топе\n"
                  "/userstop - игроки, которые уже в топе\n"
@@ -1388,6 +1433,30 @@ async def cmd_resetid(m: Message, command: CommandObject):
     await flush(outbox)
 
 
+@router.message(Command("referral"))
+async def cmd_referral(m: Message, command: CommandObject):
+    if not is_admin(m):
+        return await m.answer("Нет доступа.")
+    arg = (command.args or "").strip().lower()
+    async with lock:
+        db = db_load()
+        cur = bool(db["settings"].get("referral"))
+        if arg in ("on", "add", "вкл", "добавить", "1"):
+            db["settings"]["referral"] = True
+        elif arg in ("off", "remove", "выкл", "убрать", "0"):
+            db["settings"]["referral"] = False
+        elif arg:
+            return await m.answer("Формат: /referral on - добавить вкладку, /referral off - убрать")
+        else:
+            return await m.answer(f"Реферальная вкладка сейчас: {'включена' if cur else 'выключена'}.\n"
+                                  "/referral on - добавить, /referral off - убрать.")
+        db_save(db)
+        total = sum(u.get("ref_count", 0) for u in db["users"].values())
+    on = db["settings"]["referral"]
+    await m.answer(("Вкладка «Пригласить друга» добавлена на сайт. " if on else "Вкладка «Пригласить друга» убрана, ссылки не работают. ")
+                   + f"Всего приглашено по ссылкам: {total}.")
+
+
 @router.message(Command("elo"))
 async def cmd_elo(m: Message):
     lines = ["Система ELO зависит от вашего уровня и формата матча:"]
@@ -1648,7 +1717,7 @@ def api_logout(request, db, user, body, outbox, ctx):
 
 @api(auth=False)
 def api_me(request, db, user, body, outbox, ctx):
-    cfg = {"bot": BOT_USERNAME}
+    cfg = {"bot": BOT_USERNAME, "referral": bool(db["settings"].get("referral")), "ref_elo": REF_ELO}
     if user is None:
         return {"user": None, "cfg": cfg}
     uid = uid_of(user)
@@ -1656,7 +1725,9 @@ def api_me(request, db, user, body, outbox, ctx):
                      "banned": bool(user.get("banned")), "id_status": id_state(user),
                      "ban_left": max(0, int(user.get("ban_until", 0) - time.time())) if user.get("banned") else 0,
                      "cd_left": cd_left(user), "cd_reason": user.get("cd_reason", "") if cd_left(user) else "",
-                     "id_note": user.get("id_note", "")}, "cfg": cfg,
+                     "id_note": user.get("id_note", ""), "ref_count": user.get("ref_count", 0),
+                     "ref_wait": sum(1 for x in db["users"].values() if x.get("ref_by") == uid and not x.get("ref_paid")),
+                     "ref_link": f"https://t.me/{BOT_USERNAME}?start=ref_{uid}" if BOT_USERNAME else ""}, "cfg": cfg,
             "badges": {"friends": sum(1 for r in db["freqs"].values() if r["to"] == uid),
                        "party": sum(1 for i in db["pinvites"].values() if i["to"] == uid)}}
 
@@ -2314,6 +2385,7 @@ async def cb_idv(c: CallbackQuery):
         elif act == "ok":
             u["id_status"], u["id_note"] = "ok", ""
             outbox.append((u["tg_id"], "ID в игре подтверждён ✅ Теперь можно искать игру.", None))
+            pay_ref(db, u, outbox)
             done = f"✅ Подтверждён: {u['nick']} (ID {u['game_id']})"
             db_save(db)
         else:
@@ -2362,8 +2434,9 @@ async def cmd_verify(m: Message, command: CommandObject):
         if not u or not u.get("game_id"):
             return await m.answer("Игрок с указанным ID не найден.")
         u["id_status"], u["id_note"] = "ok", ""
-        db_save(db)
         outbox.append((u["tg_id"], "ID в игре подтверждён ✅ Теперь можно искать игру.", None))
+        pay_ref(db, u, outbox)
+        db_save(db)
     await m.answer(f"ID подтверждён: {u['nick']} ({u['game_id']}).")
     await flush(outbox)
 
@@ -2435,7 +2508,8 @@ async def debug(_):
         i = txt.find("<title>")
         info.update(size=len(raw), sha1=hashlib.sha1(raw).hexdigest()[:10],
                     title=txt[i + 7:txt.find("</title>")] if i >= 0 else None,
-                    new_version=('id="boot"' in txt and 'id="fatal"' in txt))
+                    new_version=('id="boot"' in txt and 'id="fatal"' in txt),
+                    new_background=('id="bgfx"' in txt), referral_tab=('id="t-invite"' in txt))
     return web.json_response(info, headers=NOSTORE)
 
 
