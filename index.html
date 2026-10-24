@@ -429,7 +429,7 @@ setInterval(function(){
     if(n.party>o.party){toast("Вас зовут в пати: откройте «Подбор»");if(CUR==="find"&&!BUSY&&!dlg)renderFind(true)}
     else if(n.friends>o.friends){toast("Новая заявка в друзья");if(CUR==="friends"&&!dlg)renderFriends()}}).catch(function(){})},30000);
 function fmtEl(s){var m=Math.floor(s/60);return m+":"+("0"+(s%60)).slice(-2)}
-function lastText(l){return "Последний матч: "+(l.status==="finished"?(l.result==="win"?"победа 🏆":"поражение"):l.status==="cancelled"?"отменён":l.review?"результат отправлен на проверку, ждите решения администратора":"результат оспорен, решит администратор")}
+function lastText(l){return "Последний матч: "+(l.status==="finished"?((l.result==="win"?"победа 🏆":"поражение")+(typeof l.elo==="number"?" · ELO "+(l.elo>0?"+":"")+l.elo:"")):l.status==="cancelled"?"отменён":l.review?"результат отправлен на проверку, ждите решения администратора":"результат оспорен, решит администратор")}
 function drawFind(box,u,pd,friends){
   if(pd.match)return drawMatch(box,u,pd.match);
   if(pd.queue)return drawSearching(box,pd);

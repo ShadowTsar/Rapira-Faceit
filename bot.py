@@ -64,6 +64,12 @@ MATCH_TTL = 6 * 3600       # активный матч без результат
 KEEP_DAYS = 3              # сколько хранить скриншоты завершённых матчей
 HISTORY_DAYS = 90          # сколько хранить историю матчей (кто играл, результат)
 
+# ELO за матч зависит от уровня игрока (по его ELO перед матчем): (до какого уровня включительно, победа, поражение).
+# Чем выше уровень, тем меньше дают за победу и больше снимают за поражение. Таблица ниже - для 3x3.
+ELO_TIERS = ((3, 35, 15), (6, 30, 20), (9, 25, 25), (10, 20, 30))
+# В 4x4 и 5x5 растянуто: к победе прибавляется, а к поражению добавляется столько же (поражение становится больнее).
+ELO_STRETCH = {3: 0, 4: 10, 5: 20}
+START_ELO = 1000  # с чего начинает игрок, которого ещё нет в таблице
 SIZES = (3, 4, 5)  # пати 3x3, 4x4, 5x5
 SESSION_TTL = 30 * 24 * 3600
 CODE_TTL = 5 * 60
@@ -647,10 +653,54 @@ def cd_left(u) -> int:
     return max(0, int(u.get("cd_until", 0) - time.time()))
 
 
+def settle_elo(db, m, outbox):
+    """Начисляет ELO по итогу матча. Если результат поменяли (/winner) или матч отменили (/cancelmatch),
+    сначала возвращает то, что было начислено раньше."""
+    old = m.get("elo_awards") or {}
+    win = m.get("winner") if m["status"] == "finished" else None
+    if not old and win is None:
+        return
+    data = load()
+    by_pid = {r.get("pid"): r for r in data if r.get("pid")}
+    by_uid = {uid_of(u): u for u in db["users"].values()}
+    for uid, d in old.items():  # откат прежнего начисления
+        u = by_uid.get(uid)
+        r = by_pid.get(u["pid"]) if u else None
+        if r:
+            r["elo"] = max(0, int(r["elo"]) - d)
+    new = {}
+    if win is not None:
+        for ti, t in enumerate(m["teams"]):
+            for uid in t["members"]:
+                u = by_uid.get(uid)
+                if not u:
+                    continue
+                r = by_pid.get(u["pid"])
+                if r is None:
+                    r = {"nick": u["nick"], "elo": START_ELO, "pid": u["pid"]}
+                    for k in STAT_KEYS:
+                        r[k] = 0
+                    data.append(r)
+                    by_pid[u["pid"]] = r
+                before = int(r["elo"])
+                _, w, l = next(x for x in ELO_TIERS if level_of(before) <= x[0])
+                ext = ELO_STRETCH.get(m["size"], 0)
+                delta = w + ext if ti == win else -(l + ext)
+                r["elo"] = max(0, before + delta)
+                new[uid] = r["elo"] - before
+                outbox.append((u["tg_id"], f"ELO за матч: {new[uid]:+d}, теперь у вас {r['elo']}.", None))
+    if new:
+        m["elo_awards"] = new
+    else:
+        m.pop("elo_awards", None)
+    save(data)
+
+
 def end_match(db, m, status, outbox, text, winner=None):
     m["status"], m["ended"] = status, int(time.time())
     if winner is not None:
         m["winner"] = winner
+    settle_elo(db, m, outbox)
     for t in m["teams"]:
         for uid in t["members"]:
             u = db["users"].get(uid)
@@ -937,7 +987,8 @@ async def cmd_admin(m: Message):
         "/match ID - подробности матча и скриншоты\n"
         "/winner ID CT|T - засчитать победу: CT или T = какая сторона победила на ФИНАЛЬНОМ скрине (стороны там уже поменяны), работает и для засчитанных\n"
         "/cancelmatch ID - отменить матч, даже уже засчитанный\n"
-        "/resetid ID_или_ник - сбросить ID игрока (снимает с поиска и отменяет его матч, даже если он в сети)\n"
+        "/resetid ID_или_ник - сбросить ID игрока (снимает с поиска и отменяет его матч, даже если он в сети)\n"        "/elo - таблица начисления ELO за матчи (победа и поражение по форматам)\n"
+
         "/leaver ID_или_ник [30м|1ч] - вышел из матча раньше времени: матч отменяется, поиск закрыт (по умолчанию 1ч), /unleaver - снять\n"
 
         "/broadcast Текст - рассылка всем игрокам (с предпросмотром)")
@@ -1266,7 +1317,7 @@ async def cmd_winner(m: Message, command: CommandObject):
         db_save(db)
     note = ""
     if old[0] == "finished" and old[1] is not None and old[1] != w:
-        note = f" Раньше было засчитано: {_team_label(mt, old[1])}."
+        note = f" Раньше было засчитано: {_team_label(mt, old[1])}. ELO пересчитано."
     elif old[0] == "cancelled":
         note = " Матч был отменён, теперь засчитан."
     await m.answer(f"Матч {mt['id']}: победила {_team_label(mt, w)}.{note}")
@@ -1294,7 +1345,7 @@ async def cmd_cancelmatch(m: Message, command: CommandObject):
                   "Матч отменён администратором, результат не засчитан." if was == "finished" else "Матч отменён администратором.")
         db_save(db)
     await m.answer(f"Матч {mt['id']} отменён." + (" Результат аннулирован: победа и игра убраны из профилей игроков. "
-                   "Если вы начисляли ELO через /stat, верните его вручную." if was == "finished" else ""))
+                   "ELO, начисленное за этот матч, возвращено." if was == "finished" else ""))
     await flush(outbox)
 
 
@@ -1320,6 +1371,20 @@ async def cmd_resetid(m: Message, command: CommandObject):
     outbox.append((u["tg_id"], "Администратор сбросил ваш ID в игре. Укажите правильный ID в профиле и отправьте скриншот на проверку.", None))
     await m.answer(f"ID сброшен у {u['nick']}" + (f" ({', '.join(notes)})" if notes else "") + ".")
     await flush(outbox)
+
+
+@router.message(Command("elo"))
+async def cmd_elo(m: Message):
+    lines = ["Система ELO зависит от вашего уровня и формата матча:"]
+    for n, ext in ELO_STRETCH.items():
+        lines.append(f"\n{n}x{n}:")
+        lo = 1
+        for hi, w, l in ELO_TIERS:
+            lv = f"{lo}-{hi}" if hi > lo else f"{lo}"
+            lines.append(f"Уровень {lv}{'+' if hi == ELO_TIERS[-1][0] else ''}: победа +{w + ext}, поражение -{l + ext}")
+            lo = hi + 1
+    lines.append(f"\nНовый игрок начинает с {START_ELO}. Ниже 0 ELO не опускается.")
+    await m.answer("\n".join(lines))
 
 
 @router.message(Command("leaver"))
@@ -1728,7 +1793,8 @@ def api_party(request, db, user, body, outbox, ctx):
             res = None
             if mm["status"] == "finished":
                 res = "win" if mm.get("winner") == ti else "lose"
-            last = {"status": mm["status"], "result": res, "review": bool(mm.get("review"))}
+            last = {"status": mm["status"], "result": res, "review": bool(mm.get("review")),
+                    "elo": (mm.get("elo_awards") or {}).get(me)}
             break
     modes = {n: sum(len(x["members"]) for x in db["queue"].values() if x["size"] == n and is_fresh(x)) for n in SIZES}
     return {"party": party_view(db, p, me) if p else None, "invites": invites, "modes": modes,
