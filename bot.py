@@ -69,6 +69,8 @@ HISTORY_DAYS = 90          # сколько хранить историю мат
 ELO_TIERS = ((3, 35, 15), (6, 30, 20), (9, 25, 25), (10, 20, 30))
 # В 4x4 и 5x5 растянуто: к победе прибавляется, а к поражению добавляется столько же (поражение становится больнее).
 ELO_STRETCH = {3: 0, 4: 10, 5: 20}
+REF_WEEK_LIMIT = 5  # не больше стольких засчитанных приглашений за 7 дней (скользящее окно)
+REF_WEEK = 7 * 86400
 REF_ELO = 30       # награда пригласившему за нового друга
 START_ELO = 1000  # с чего начинает игрок, которого ещё нет в таблице
 SIZES = (3, 4, 5)  # пати 3x3, 4x4, 5x5
@@ -678,6 +680,13 @@ def award_ref(inv: dict) -> int:
     return r["elo"]
 
 
+def ref_recent(db, inv_uid: str) -> list:
+    """Время засчитанных приглашений игрока за последние 7 дней (старые первыми)."""
+    t = time.time() - REF_WEEK
+    return sorted(x["ref_paid_at"] for x in db["users"].values()
+                  if x.get("ref_by") == inv_uid and x.get("ref_paid") and x.get("ref_paid_at", 0) > t)
+
+
 def pay_ref(db, u, outbox) -> None:
     """Когда ID приглашённого подтверждён - платим пригласившему +REF_ELO (один раз за друга)."""
     inv = db["users"].get(u.get("ref_by", ""))
@@ -686,7 +695,12 @@ def pay_ref(db, u, outbox) -> None:
     gid = u.get("game_id")
     if gid and any(x is not u and x.get("ref_paid") and x.get("game_id") == gid for x in db["users"].values()):
         return  # этот игровой ID уже приносил награду (защита от лишних аккаунтов)
-    u["ref_paid"] = True
+    if len(ref_recent(db, u["ref_by"])) >= REF_WEEK_LIMIT:
+        u["ref_skipped"] = True  # лимит недели: за этого друга награды не будет
+        outbox.append((inv["tg_id"], f"Ваш друг {u['nick']} подтвердил ID, но лимит наград за приглашения "
+                       f"({REF_WEEK_LIMIT} в неделю) исчерпан, ELO за него не начислено.", None))
+        return
+    u["ref_paid"], u["ref_paid_at"] = True, int(time.time())
     inv["ref_count"] = inv.get("ref_count", 0) + 1
     new_elo = award_ref(inv)
     outbox.append((inv["tg_id"], f"Ваш друг {u['nick']} подтвердил ID в игре: +{REF_ELO} ELO (теперь {new_elo}).", None))
@@ -920,7 +934,7 @@ async def cmd_start(m: Message, command: CommandObject):
         text += ("\n\nКоманды админа:\n"
                  "/untop ID_или_@ник - убрать игрока из топа\n"
                  "/resetid ID_или_ник - сбросить ID игрока (снимает с поиска и отменяет его матч, даже если он в сети)\n"
-                 "/leaver ID_или_ник [30м|1ч] - вышел из матча раньше времени: матч отменяется, поиск закрыт (по умолчанию 1ч), /unleaver - снять\n"                 "/referral on|off - включить или убрать вкладку «Пригласить друга» на сайте (+30 ELO, когда ID нового игрока подтвердят)\n"
+                 "/leaver ID_или_ник [30м|1ч] - вышел из матча раньше времени: матч отменяется, поиск закрыт (по умолчанию 1ч), /unleaver - снять\n"                 "/referral on|off - включить или убрать вкладку «Пригласить друга» на сайте (+30 ELO, когда ID нового игрока подтвердят; не больше 5 в неделю на человека)\n"
 
                  "/ban ID_или_@ник [срок] [причина] - блокировка (срок: 30м, 1ч, 1д; без срока навсегда), /unban, /banlist\n"
                  "/users - зарегистрировались, но ещё не в топе\n"
@@ -1717,7 +1731,7 @@ def api_logout(request, db, user, body, outbox, ctx):
 
 @api(auth=False)
 def api_me(request, db, user, body, outbox, ctx):
-    cfg = {"bot": BOT_USERNAME, "referral": bool(db["settings"].get("referral")), "ref_elo": REF_ELO}
+    cfg = {"bot": BOT_USERNAME, "referral": bool(db["settings"].get("referral")), "ref_elo": REF_ELO, "ref_limit": REF_WEEK_LIMIT}
     if user is None:
         return {"user": None, "cfg": cfg}
     uid = uid_of(user)
@@ -1726,7 +1740,11 @@ def api_me(request, db, user, body, outbox, ctx):
                      "ban_left": max(0, int(user.get("ban_until", 0) - time.time())) if user.get("banned") else 0,
                      "cd_left": cd_left(user), "cd_reason": user.get("cd_reason", "") if cd_left(user) else "",
                      "id_note": user.get("id_note", ""), "ref_count": user.get("ref_count", 0),
-                     "ref_wait": sum(1 for x in db["users"].values() if x.get("ref_by") == uid and not x.get("ref_paid")),
+                     "ref_wait": sum(1 for x in db["users"].values()
+                                     if x.get("ref_by") == uid and not x.get("ref_paid") and not x.get("ref_skipped")),
+                     "ref_left": max(0, REF_WEEK_LIMIT - len(ref_recent(db, uid))),
+                     "ref_reset": (int(ref_recent(db, uid)[0] + REF_WEEK - time.time())
+                                   if len(ref_recent(db, uid)) >= REF_WEEK_LIMIT else 0),
                      "ref_link": f"https://t.me/{BOT_USERNAME}?start=ref_{uid}" if BOT_USERNAME else ""}, "cfg": cfg,
             "badges": {"friends": sum(1 for r in db["freqs"].values() if r["to"] == uid),
                        "party": sum(1 for i in db["pinvites"].values() if i["to"] == uid)}}
