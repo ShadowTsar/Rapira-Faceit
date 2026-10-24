@@ -387,6 +387,21 @@ def top_stats(pid: str):
             "wins": r["wins"], "losses": r["losses"], "level": r["level"]}
 
 
+def match_history(db, uid: str, limit: int = 20) -> list:
+    """Последние завершённые матчи игрока: формат, результат, изменение ELO, с кем играл."""
+    rows = []
+    for m in db["matches"].values():
+        if m["status"] != "finished" or m.get("winner") is None:
+            continue
+        for i, t in enumerate(m["teams"]):
+            if uid in t["members"]:
+                rows.append({"id": m["id"], "size": m["size"], "ended": m.get("ended", 0), "win": m["winner"] == i,
+                             "elo": (m.get("elo_awards") or {}).get(uid),
+                             "with": [db["users"][x]["nick"] for x in t["members"] if x != uid and x in db["users"]]})
+    rows.sort(key=lambda r: r["ended"], reverse=True)
+    return rows[:limit]
+
+
 def match_record(db, uid: str) -> dict:
     """Сколько завершённых матчей сыграл игрок и сколько выиграл (история хранится HISTORY_DAYS дней)."""
     games = wins = 0
@@ -1684,6 +1699,7 @@ def api_user(request, db, user, body, outbox, ctx):
     if st:
         d["stats"] = st
     d["record"] = match_record(db, uid_of(u))
+    d["history"] = match_history(db, uid_of(u))
     if user["tg_id"] in ADMIN_IDS:
         d["banned"] = bool(u.get("banned"))
         d["ban_reason"] = u.get("ban_reason", "")
@@ -2446,7 +2462,8 @@ async def api_public_profile(request):
         st = top_stats(pid) if u else None
     if not u or not st:
         return web.json_response({"error": "Игрок не найден"}, status=404, headers=NOSTORE)
-    return web.json_response({**pub(u), "stats": st, "record": match_record(db, uid_of(u))}, headers=NOSTORE)
+    return web.json_response({**pub(u), "stats": st, "record": match_record(db, uid_of(u)),
+                              "history": match_history(db, uid_of(u))}, headers=NOSTORE)
 
 
 async def health(_):
