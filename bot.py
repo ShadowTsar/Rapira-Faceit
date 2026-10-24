@@ -264,8 +264,12 @@ def level_of(elo: int) -> int:
 STAT_KEYS = ("kills", "deaths", "wins", "losses")
 
 
-def ranked(data: list) -> list:
-    rows = sorted(data, key=lambda p: p["elo"], reverse=True)[:TOP_N]
+def ranked(data: list, limit=TOP_N) -> list:
+    """Таблица по ELO. В топ-100 попадают сильнейшие: если у 101-го ELO станет выше, чем у 100-го, они меняются местами сами.
+    limit=None - вся таблица (игроки за пределами топа тоже хранят статистику и видят её в профиле)."""
+    rows = sorted(data, key=lambda p: p["elo"], reverse=True)
+    if limit:
+        rows = rows[:limit]
     out = []
     for i, p in enumerate(rows, start=1):
         r = {k: v for k, v in p.items() if k not in ("kd", "win")}  # старые поля K/D и % побед больше не используются
@@ -370,10 +374,10 @@ def pub(u: dict) -> dict:
 
 def top_stats(pid: str):
     """Место, ELO, Kill, Death, Win и Lose игрока, если он есть в топе (привязан к профилю)."""
-    r = next((x for x in ranked(load()) if x.get("pid") == pid), None)
+    r = next((x for x in ranked(load(), None) if x.get("pid") == pid), None)
     if not r:
         return None
-    return {"rank": r["rank"], "elo": r["elo"], "kills": r["kills"], "deaths": r["deaths"],
+    return {"rank": r["rank"], "in_top": r["rank"] <= TOP_N, "elo": r["elo"], "kills": r["kills"], "deaths": r["deaths"],
             "wins": r["wins"], "losses": r["losses"], "level": r["level"]}
 
 
@@ -986,7 +990,7 @@ async def cmd_userstop(m: Message, command: CommandObject):
         db, top = db_load(), load()
     by_pid = {u["pid"]: u for u in db["users"].values()}
     rows = []
-    for r in ranked(top):
+    for r in ranked(top, None):
         u = by_pid.get(r.get("pid"))
         rows.append((r, u))
     if q:
@@ -1000,7 +1004,7 @@ async def cmd_userstop(m: Message, command: CommandObject):
     lines = [f"В топе: {len(rows)}" + (f" (страница {page}/{pages}, дальше: /userstop {page + 1})" if pages > 1 else "")]
     for r, u in rows[(page - 1) * per:page * per]:
         who = f"ID {u.get('game_id') or '-'} | {tg_tag(u)}" if u else "без профиля на сайте"
-        lines.append(f"{r['rank']}. {r['nick']} | ELO {r['elo']} | {who}")
+        lines.append(f"{r['rank']}. {r['nick']} | ELO {r['elo']} | {who}" + (" | вне топ-100" if r["rank"] > TOP_N else ""))
     lines.append("Убрать из топа: /untop ID_в_игре или @ник (для строк «без профиля» ник из списка)")
     await _send_long(m, lines)
 
@@ -1060,6 +1064,7 @@ async def cmd_stat(m: Message, command: CommandObject):
         u = find_user(db, parts[0])
         if not u:
             return await m.answer("Игрок не найден. Список зарегистрированных: /users")
+        before = {x.get("pid") or x["nick"].lower(): x["nick"] for x in ranked(data)}
         row = next((x for x in data if x.get("pid") == u["pid"]), None)
         if row is None:
             same = next((x for x in data if x["nick"].lower() == u["nick"].lower()), None)
@@ -1081,9 +1086,24 @@ async def cmd_stat(m: Message, command: CommandObject):
             row[k] = int(row.get(k) or 0)
         row["pid"] = u["pid"]
         save(data)
+        full = ranked(data, None)
+        place = next(r["rank"] for r in full if r.get("pid") == u["pid"])
+        after = {x.get("pid") or x["nick"].lower() for x in full[:TOP_N]}
+        dropped = [(k, n) for k, n in before.items() if k not in after and k not in (u["pid"], u["nick"].lower())]
+        notes = []
+        if place > TOP_N:
+            notes.append(f"Место №{place}: вне топ-{TOP_N}, статистика сохранена и видна в профиле игрока.")
+        else:
+            notes.append(f"Место в топе: №{place}.")
+        outbox = []
+        for k, n in dropped:
+            notes.append(f"Из топа-{TOP_N} вылетел: {n} (ELO ниже, чем у {u['nick']}).")
+            du = next((x for x in db["users"].values() if x["pid"] == k), None)
+            if du:
+                outbox.append((du["tg_id"], f"Вы вылетели из топа-{TOP_N}: вас обошёл {u['nick']}. Статистика в профиле сохранена.", None))
         res = f"ELO {row['elo']}, Kill {row['kills']}, Death {row['deaths']}, Win {row['wins']}, Lose {row['losses']}"
-        outbox = [(u["tg_id"], f"Вам начислена статистика: {res}. Ваш профиль в топе: {PUBLIC_URL or 'на сайте'}", None)]
-    await m.answer(f"Готово: {u['nick']} (ID {u.get('game_id') or '-'}) - {res}. Профиль привязан к топу.")
+        outbox.append((u["tg_id"], f"Вам начислена статистика: {res}. " + notes[0] + f" Ваш профиль: {PUBLIC_URL or 'на сайте'}", None))
+    await m.answer(f"Готово: {u['nick']} (ID {u.get('game_id') or '-'}) - {res}.\n" + "\n".join(notes))
     await flush(outbox)
 
 
@@ -1134,7 +1154,7 @@ async def cb_season(c: CallbackQuery):
     await c.answer("Сбрасываю…")
     async with lock:
         data = load()
-        old = ranked(data)
+        old = ranked(data, None)
         for row in data:
             row["elo"] = elo
             if wipe:

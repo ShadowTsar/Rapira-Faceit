@@ -357,7 +357,7 @@ function whoLink(u,sz,fn){return h("a",{href:"#",class:"who lnk",onclick:functio
 function statsBlock(u,own){
   var s=u.stats,r=u.record,box=h("div");
   if(s){
-    box.appendChild(h("div",{class:"stats"},[["Место","№"+s.rank],["ELO",s.elo]].map(function(x){
+    box.appendChild(h("div",{class:"stats"},[[s.in_top===false?"Место (вне топа)":"Место","№"+s.rank],["ELO",s.elo]].map(function(x){
       return h("div",{class:"stat"},h("b",{text:String(x[1])}),h("span",{text:x[0]}))}),
       h("div",{class:"stat wide"},h("b",{text:(s.kills||0)+" Kill / "+(s.deaths||0)+" Death"}),h("b",{text:(s.wins||0)+" Win / "+(s.losses||0)+" Lose"}))));
     box.appendChild(h("div",{class:"meta"},h("span",{class:"lvl",text:s.level})," уровень"))}
