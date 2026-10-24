@@ -58,6 +58,7 @@ VOTE_TIME = 60           # секунд на голосование за кар�
 CHAT_MAX = 200           # сообщений чата матча в памяти
 FRESH = 60              # заявка участвует в подборе, только если игрок был на сайте за последнюю минуту
 STALE_DROP = 300         # заявка без игрока дольше 5 минут удаляется
+LEAVE_CD = 3600           # запрет на поиск за выход из матча до конца игры (секунд)
 QUEUE_TTL = 3600           # поиск без матча сбрасывается через час
 MATCH_TTL = 6 * 3600       # активный матч без результата отменяется через 6 часов
 KEEP_DAYS = 3              # сколько хранить скриншоты завершённых матчей
@@ -619,6 +620,29 @@ def try_match(db, n, outbox):
                 outbox.append((u["tg_id"], f"Матч {n}x{n} найден! Вы в команде {ti}, сторона: {SIDE_NAME[sides[ti - 1]]}.\n{role}", room_kb()))
 
 
+def drop_games(db, u, outbox, why: str) -> list:
+    """Снимает игрока с поиска и отменяет его активный матч (даже если он в сети). Возвращает заметки для админа."""
+    notes, uid = [], uid_of(u)
+    t = queue_of(db, uid)
+    if t:
+        del db["queue"][t["id"]]
+        notes.append("поиск игры отменён")
+        for mem in t["members"]:
+            mu = db["users"].get(mem)
+            if mu and mem != uid:
+                outbox.append((mu["tg_id"], f"Поиск игры отменён: {why}. Запустите поиск заново.", None))
+    mt = match_of(db, uid)
+    if mt:
+        end_match(db, mt, "cancelled", outbox, f"Матч отменён: {why}.")
+        notes.append("матч отменён")
+    return notes
+
+
+def cd_left(u) -> int:
+    """Секунд до конца запрета на поиск (за выход из матча)."""
+    return max(0, int(u.get("cd_until", 0) - time.time()))
+
+
 def end_match(db, m, status, outbox, text, winner=None):
     m["status"], m["ended"] = status, int(time.time())
     if winner is not None:
@@ -783,6 +807,7 @@ async def cmd_start(m: Message, command: CommandObject):
         text += ("\n\nКоманды админа:\n"
                  "/untop ID_или_@ник - убрать игрока из топа\n"
                  "/resetid ID_или_ник - сбросить ID игрока (снимает с поиска и отменяет его матч, даже если он в сети)\n"
+                 "/leaver ID_или_ник [30м|1ч] - вышел из матча раньше времени: матч отменяется, поиск закрыт (по умолчанию 1ч), /unleaver - снять\n"
                  "/ban ID_или_@ник [срок] [причина] - блокировка (срок: 30м, 1ч, 1д; без срока навсегда), /unban, /banlist\n"
                  "/users - зарегистрировались, но ещё не в топе\n"
                  "/userstop - игроки, которые уже в топе\n"
@@ -909,6 +934,8 @@ async def cmd_admin(m: Message):
         "/winner ID CT|T - засчитать победу: CT или T = какая сторона победила на ФИНАЛЬНОМ скрине (стороны там уже поменяны), работает и для засчитанных\n"
         "/cancelmatch ID - отменить матч, даже уже засчитанный\n"
         "/resetid ID_или_ник - сбросить ID игрока (снимает с поиска и отменяет его матч, даже если он в сети)\n"
+        "/leaver ID_или_ник [30м|1ч] - вышел из матча раньше времени: матч отменяется, поиск закрыт (по умолчанию 1ч), /unleaver - снять\n"
+
         "/broadcast Текст - рассылка всем игрокам (с предпросмотром)")
 
 
@@ -1265,24 +1292,58 @@ async def cmd_resetid(m: Message, command: CommandObject):
         u = find_user(db, key)
         if not u:
             return await m.answer("Игрок не найден. Укажите ID в игре, ник или @username.")
-        if not (u.get("game_id") or u.get("id_status")):
+        notes = drop_games(db, u, outbox, f"администратор сбросил ID у игрока {u['nick']}")
+        if not (u.get("game_id") or u.get("id_status")) and not notes:
             return await m.answer(f"У {u['nick']} ID и так не указан.")
-        t = queue_of(db, uid_of(u))
-        if t:  # искать игру без проверенного ID нельзя: снимаем заявку и предупреждаем остальных
-            del db["queue"][t["id"]]
-            notes.append("поиск игры отменён")
-            for mem in t["members"]:
-                mu = db["users"].get(mem)
-                if mu and mem != uid_of(u):
-                    outbox.append((mu["tg_id"], f"Поиск игры отменён: у игрока {u['nick']} сбросили ID. Запустите поиск заново.", None))
-        mt = match_of(db, uid_of(u))
-        if mt:  # без проверенного ID играть нельзя: матч отменяется, все участники получат сообщение
-            end_match(db, mt, "cancelled", outbox, f"Матч отменён: администратор сбросил ID у игрока {u['nick']}.")
-            notes.append("матч отменён")
         u["game_id"], u["id_status"], u["id_note"] = "", "", ""
         db_save(db)
     outbox.append((u["tg_id"], "Администратор сбросил ваш ID в игре. Укажите правильный ID в профиле и отправьте скриншот на проверку.", None))
     await m.answer(f"ID сброшен у {u['nick']}" + (f" ({', '.join(notes)})" if notes else "") + ".")
+    await flush(outbox)
+
+
+@router.message(Command("leaver"))
+async def cmd_leaver(m: Message, command: CommandObject):
+    # вышел из игры до конца матча: матч отменяется, игроку запрещён поиск (по умолчанию 1 час)
+    if not is_admin(m):
+        return await m.answer("Нет доступа.")
+    args = (command.args or "").strip().split(None, 1)
+    if not args:
+        return await m.answer("Формат: /leaver ID_или_@ник [30м|1ч] - отменяет матч и запрещает вышедшему поиск (по умолчанию 1ч)")
+    sec, _ = parse_duration(args[1]) if len(args) > 1 else (0, "")
+    sec = sec or LEAVE_CD
+    outbox = []
+    async with lock:
+        db = db_load()
+        u = find_user(db, args[0])
+        if not u:
+            return await m.answer("Игрок не найден. Укажите ID в игре, ник или @username.")
+        drop_games(db, u, outbox, f"игрок {u['nick']} вышел из игры до конца матча")
+        u["cd_until"], u["cd_reason"] = time.time() + sec, "Выход из матча до конца игры"
+        db_save(db)
+    outbox.append((u["tg_id"], f"Вы вышли из матча до его конца. Поиск игр закрыт на {fmt_dur(sec)}, "
+                   "таймер виден на сайте рядом с кнопкой поиска.", None))
+    await m.answer(f"{u['nick']}: поиск закрыт на {fmt_dur(sec)}, активный матч отменён.")
+    await flush(outbox)
+
+
+@router.message(Command("unleaver"))
+async def cmd_unleaver(m: Message, command: CommandObject):
+    if not is_admin(m):
+        return await m.answer("Нет доступа.")
+    key = (command.args or "").strip()
+    if not key:
+        return await m.answer("Формат: /unleaver ID_или_@ник - снять запрет на поиск")
+    outbox = []
+    async with lock:
+        db = db_load()
+        u = find_user(db, key)
+        if not u:
+            return await m.answer("Игрок не найден.")
+        u["cd_until"], u["cd_reason"] = 0, ""
+        db_save(db)
+    outbox.append((u["tg_id"], "Запрет на поиск игр снят.", None))
+    await m.answer(f"Запрет на поиск снят: {u['nick']}.")
     await flush(outbox)
 
 
@@ -1494,6 +1555,7 @@ def api_me(request, db, user, body, outbox, ctx):
     return {"user": {**pub(user), "tg": user.get("tg_username", ""), "admin": user["tg_id"] in ADMIN_IDS,
                      "banned": bool(user.get("banned")), "id_status": id_state(user),
                      "ban_left": max(0, int(user.get("ban_until", 0) - time.time())) if user.get("banned") else 0,
+                     "cd_left": cd_left(user), "cd_reason": user.get("cd_reason", "") if cd_left(user) else "",
                      "id_note": user.get("id_note", "")}, "cfg": cfg,
             "badges": {"friends": sum(1 for r in db["freqs"].values() if r["to"] == uid),
                        "party": sum(1 for i in db["pinvites"].values() if i["to"] == uid)}}
@@ -1811,6 +1873,11 @@ def api_queue_start(request, db, user, body, outbox, ctx):
         if bu.get("banned"):
             raise ApiError(403, ("Вы заблокированы администратором" if m == me else f"Игрок {bu.get('nick')} заблокирован")
                            + (f": {bu['ban_reason']}" if bu.get("ban_reason") else "") + ban_left(bu))
+    for m in members:
+        cu = db["users"].get(m, {})
+        if cd_left(cu):
+            who = "Вам" if m == me else f"Игроку {cu.get('nick')}"
+            raise ApiError(403, f"{who} нельзя искать игру ещё {fmt_dur(((cd_left(cu) + 59) // 60) * 60)}: выход из матча до конца игры")
     for m in members:
         mu = db["users"].get(m, {})
         if id_state(mu) != "ok":
@@ -2150,6 +2217,7 @@ async def cb_idv(c: CallbackQuery):
         else:
             outbox.append((u["tg_id"], "Администратор отклонил ID: он не совпал со скриншотом. "
                            "Укажите ID заново в профиле и приложите скриншот игрового профиля, где виден ID.", None))
+            drop_games(db, u, outbox, f"ID игрока {u['nick']} отклонён администратором")
             u["game_id"], u["id_status"], u["id_note"] = "", "rejected", "ID не совпал со скриншотом"
             done = f"❌ Отклонён: {u['nick']}"
             db_save(db)

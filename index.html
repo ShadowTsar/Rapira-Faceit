@@ -291,6 +291,7 @@ function avatarBlock(u){
 var NEEDID=false;
 function startSearch(size){
   var st=S.me&&S.me.user?S.me.user.id_status:"";
+  if(S.me&&S.me.user&&(S.me.user.banned||S.me.user.cd_left>0)){toast("Поиск пока недоступен",true);return}
   if(st==="ok"){act("/api/queue/start",{size:size});return}
   if(st==="pending"){toast("ID на проверке у администратора, подождите подтверждения",true);return}
   NEEDID=true;toast("Сначала подтвердите ID в профиле",true);go("me")}
@@ -439,14 +440,26 @@ function drawFind(box,u,pd,friends){
         h("button",{class:"btn ghost sm",text:"Отклонить",onclick:function(){act("/api/pinvites/"+i.id+"/decline",{})}}),
         h("button",{class:"btn ghost sm",text:"Профиль",onclick:function(){showProfile(i.from.pid)}}))))});
   if(pd.last)box.appendChild(h("div",{class:"card"},h("span",{class:"meta",text:lastText(pd.last)})));
+  var lockLeft=u.banned?u.ban_left:u.cd_left,locked=!!u.banned||u.cd_left>0;
   if(u.banned)box.appendChild(h("div",{class:"card"},h("b",{class:"bad",text:"Вы заблокированы администратором"}),h("p",{class:"meta",text:(u.ban_left>0?"Бан закончится через "+Math.ceil(u.ban_left/60)+" мин. ":"")+"Поиск игры недоступен. Если это ошибка, напишите администратору."})));
+  else if(u.cd_left>0)box.appendChild(h("div",{class:"card"},h("b",{class:"bad",text:"Поиск игр закрыт"}),h("p",{class:"meta",text:(u.cd_reason||"Выход из матча до конца игры")+". Кнопка поиска включится, когда закончится таймер."})));
   box.appendChild(h("div",{class:"seg"},MODES.map(function(m){return h("button",{class:"btn"+(size===m[0]?"":" ghost"),text:m[1],disabled:!leader,onclick:function(){
     if(p)act("/api/party/size",{size:m[0]});else{LOBBY.size=m[0];renderFind()}}})})));
   box.appendChild(h("p",{class:"meta",text:"Сейчас в поиске: "+MODES.map(function(m){return m[1]+" — "+((pd.modes||{})[m[0]]||0)}).join(" · ")}));
   var members=p?p.members:[{pid:u.pid,nick:u.nick,av:u.av||0,game_id:u.game_id||"",leader:true}],invited=p?p.invited:[];
   if(u.id_status!=="ok")box.appendChild(h("div",{class:"card"},h("p",{class:"meta",text:u.id_status==="pending"?"ID на проверке у администратора. Как только он подтвердит, можно искать игру.":"Чтобы искать игру, укажите ID и отправьте скриншот игрового профиля на проверку."}),
     u.id_status==="pending"?null:h("button",{class:"btn sm",type:"button",text:"Подтвердить ID",onclick:function(){NEEDID=true;go("me")}})));
-  if(leader)box.appendChild(h("button",{class:"btn big",text:"🔍 Найти игру "+size+"×"+size,onclick:function(){startSearch(size)}}));
+  if(leader){
+    var go1=h("button",{class:"btn big",text:"🔍 Найти игру "+size+"×"+size,disabled:locked,onclick:function(){startSearch(size)}});
+    if(locked){
+      var tmr=h("span",{class:"bad",style:"font-weight:700;white-space:nowrap",text:u.banned&&!(lockLeft>0)?"бан":"⏳ "+fmtEl(lockLeft)}),end=Date.now()+lockLeft*1000;
+      box.appendChild(h("div",{class:"row",style:"align-items:center;gap:12px"},go1,tmr));
+      if(lockLeft>0){var iv2=setInterval(function(){
+        if(!document.body.contains(tmr)){clearInterval(iv2);return}
+        var l=Math.ceil((end-Date.now())/1000);
+        if(l<=0){clearInterval(iv2);toast("Поиск снова доступен");loadMe().then(function(){renderFind()});return}
+        tmr.textContent="⏳ "+fmtEl(l)},1000)}
+    }else box.appendChild(go1)}
   else box.appendChild(h("p",{class:"muted",text:"Поиск запускает лидер пати"}));
   box.appendChild(h("div",{class:"pty-h"},h("span",{text:"ПАТИ"}),h("span",{},h("b",{text:members.length}),"/"+size)));
   var slots=h("div",{class:"pty",style:"--n:"+size});
@@ -565,7 +578,7 @@ function drawMatch(box,u,m){
   box.appendChild(teams);
   drawChat(box,m);
   var res=h("div",{class:"card"},h("h3",{text:"Результат матча"}),
-    h("p",{class:"meta bad",text:"⚠️ Не выходите из игры в конце матча, пока капитан не сделал скриншот финального счёта. Если игрок выйдет раньше, матч будет отменён, а вышедший получит бан на поиск игр на 1 час."}));
+    h("p",{class:"meta bad",text:"⚠️ Не выходите из игры в конце матча, пока капитан не сделал скриншот финального счёта. Если кто-то выйдет раньше, матч будет отменён, а вышедший не сможет искать игры 1 час: кнопка «Найти игру» будет заблокирована, рядом покажем таймер до снятия запрета."}));
   if(m.shots.length){m.shots.forEach(function(s){res.appendChild(h("div",{class:"meta",text:"Скриншот · команда "+(s.team+1)}));res.appendChild(shotImg(m.id,s.id))})}
   else res.appendChild(h("p",{class:"muted",text:"Скриншотов пока нет. После игры капитан прикрепляет скриншот результата."}));
   if(rep&&rep.team!==m.team){
