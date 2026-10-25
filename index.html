@@ -681,14 +681,14 @@ function renderInvite(){
     var inp=h("input",{readonly:true,value:link,"aria-label":"Ваша ссылка-приглашение",onclick:function(){this.select()}});
     box.appendChild(h("div",{class:"card"},
       h("h2",{text:"🎁 Пригласите друга в Rapira Faceit"}),
-      h("p",{class:"meta",text:"Вы получите +"+elo+" ELO за каждого друга, который впервые откроет бота по вашей ссылке и чей ID в игре подтвердит администратор. Не больше "+(S.cfg.ref_limit||5)+" наград в неделю. Если у друга бот уже есть, ссылка не сработает."}),
+      h("p",{class:"meta",text:"Вы получите +"+elo+" ELO за каждого друга, который впервые откроет бота по вашей ссылке и сыграет свою первую игру. Не больше "+(S.cfg.ref_limit||5)+" наград в неделю. Если у друга бот уже есть, ссылка не сработает."}),
       link?inp:h("p",{class:"bad",text:"Ссылка пока недоступна: у бота не задан username."}),
       link?h("div",{class:"row"},
         h("button",{class:"btn",text:"Скопировать",onclick:function(){copyText(link);toast("Ссылка скопирована")}}),
         h("button",{class:"btn ghost",text:"Отправить в Telegram",onclick:function(){
           window.open("https://t.me/share/url?url="+encodeURIComponent(link)+"&text="+encodeURIComponent("Го играть в Rapira Faceit!"),"_blank")}})):null,
       h("p",{class:(u.ref_left>0?"muted":"bad"),text:u.ref_left>0?"Наград осталось на этой неделе: "+u.ref_left+" из "+(S.cfg.ref_limit||5):"Лимит наград на неделю исчерпан, следующая будет доступна через "+(u.ref_reset>=86400?Math.ceil(u.ref_reset/86400)+" дн.":Math.max(1,Math.ceil(u.ref_reset/3600))+" ч.")}),
-      h("p",{class:"muted",text:"Засчитано друзей: "+(u.ref_count||0)+" · получено ELO: +"+((u.ref_count||0)*elo)+((u.ref_wait||0)?" · ждут подтверждения ID: "+u.ref_wait:"")})))})}
+      h("p",{class:"muted",text:"Засчитано друзей: "+(u.ref_count||0)+" · получено ELO: +"+((u.ref_count||0)*elo)+((u.ref_wait||0)?" · ждут первой игры: "+u.ref_wait:"")})))})}
 function renderFriends(){
   var box=$("#t-friends");clear(box);
   loadMe().then(function(){

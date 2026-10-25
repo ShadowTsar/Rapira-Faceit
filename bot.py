@@ -9,8 +9,6 @@
                   матчи, скриншоты, аватарки) хранятся в базе и не пропадают при деплое
   DATA_FILE     - файл с топом игроков (по умолчанию data.json), нужен только без DATABASE_URL
   APP_FILE      - файл с пользователями, командами, заявками (по умолчанию app.json)
-  REQUIRED_CHATS - обязательная подписка: каналы и чаты через запятую, например @my_channel,@my_chat
-                  (для закрытых: -1001234567890|https://t.me/+ссылка). Бот должен быть администратором в каждом из них
   BOT_USERNAME  - необязательно, @username бота (иначе берётся через getMe)
   SHOTS_DIR / AVATARS_DIR - папки для картинок, только без DATABASE_URL
 
@@ -31,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
+from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import (CallbackQuery, InlineKeyboardButton,
                            InlineKeyboardMarkup, Message, WebAppInfo, BufferedInputFile)
@@ -82,28 +80,6 @@ CODE_TTL = 5 * 60
 lock = asyncio.Lock()
 router = Router()
 
-
-def _parse_required() -> list:
-    out = []
-    for item in os.getenv("REQUIRED_CHATS", "").split(","):
-        item, link = item.strip(), ""
-        if not item:
-            continue
-        if "|" in item:
-            item, link = (x.strip() for x in item.split("|", 1))
-        if item.startswith("https://t.me/"):
-            link, item = item, "@" + item.rstrip("/").rsplit("/", 1)[-1]
-        chat = int(item) if item.lstrip("-").isdigit() else "@" + item.lstrip("@")
-        if not link and isinstance(chat, str):
-            link = "https://t.me/" + chat[1:]
-        out.append({"chat": chat, "link": link, "title": None})
-    return out
-
-
-REQUIRED = _parse_required()
-SUB_OK: dict = {}      # tg_id -> когда подписка была подтверждена (кэш, чтобы не дёргать Telegram на каждый запрос)
-SUB_TTL = 120
-_SUB_WARNED: set = set()
 bot = Bot(BOT_TOKEN)
 NOSTORE = {"Cache-Control": "no-store"}
 
@@ -728,7 +704,7 @@ def pay_ref(db, u, outbox) -> None:
     u["ref_paid"], u["ref_paid_at"] = True, int(time.time())
     inv["ref_count"] = inv.get("ref_count", 0) + 1
     new_elo = award_ref(inv)
-    outbox.append((inv["tg_id"], f"Ваш друг {u['nick']} подтвердил ID в игре: +{REF_ELO} ELO (теперь {new_elo}).", None))
+    outbox.append((inv["tg_id"], f"Ваш друг {u['nick']} сыграл свою первую игру: +{REF_ELO} ELO (теперь {new_elo}).", None))
 
 
 def cd_left(u) -> int:
@@ -797,6 +773,8 @@ def end_match(db, m, status, outbox, text, winner=None):
             u = db["users"].get(uid)
             if u:
                 outbox.append((u["tg_id"], text, None))
+                if status == "finished":
+                    pay_ref(db, u, outbox)  # приглашённый друг сыграл матч -> награда пригласившему
 
 
 def notify_admins_dispute(db, m, outbox):
@@ -911,73 +889,6 @@ def resolve_pinvite(db, iid, actor, accept, outbox) -> str:
     return f"Вы в пати {owner['nick'] if owner else ''}".strip()
 
 
-async def sub_missing(tg_id: int) -> list:
-    """На что игрок ещё не подписан: [{title, link}]. Админы освобождены. Если бот не может проверить чат (не админ), не блокируем."""
-    if not REQUIRED or tg_id in ADMIN_IDS:
-        return []
-    if SUB_OK.get(tg_id, 0) > time.time() - SUB_TTL:
-        return []
-    missing = []
-    for r in REQUIRED:
-        ok = True
-        try:
-            mem = await bot.get_chat_member(r["chat"], tg_id)
-            ok = mem.status in ("creator", "administrator", "member") or (
-                mem.status == "restricted" and getattr(mem, "is_member", False))
-        except Exception as e:
-            if r["chat"] not in _SUB_WARNED:
-                _SUB_WARNED.add(r["chat"])
-                logging.warning("Не удалось проверить подписку на %s (бот должен быть админом): %s", r["chat"], e)
-        if not ok:
-            if r["title"] is None:
-                try:
-                    r["title"] = (await bot.get_chat(r["chat"])).title or str(r["chat"])
-                except Exception:
-                    r["title"] = str(r["chat"])
-            missing.append({"title": r["title"], "link": r["link"]})
-    if not missing:
-        SUB_OK[tg_id] = time.time()
-    return missing
-
-
-def sub_keyboard(missing: list) -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(text=f"👉 {x['title']}", url=x["link"])] for x in missing if x["link"]]
-    rows.append([InlineKeyboardButton(text="✅ Я подписался", callback_data="sub:check")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-SUB_TEXT = ("Чтобы пользоваться ботом, нужно быть подписанным на наш канал и чат. "
-            "Подпишитесь по кнопкам ниже и нажмите «Я подписался».\n"
-            "Если вы пришли по ссылке-приглашению, после подписки откройте её ещё раз.")
-
-
-class SubGate(BaseMiddleware):
-    async def __call__(self, handler, event, data):
-        if not REQUIRED:
-            return await handler(event, data)
-        is_cb = isinstance(event, CallbackQuery)
-        if is_cb and (event.data or "") == "sub:check":
-            return await handler(event, data)
-        user = event.from_user
-        chat = event.message.chat if is_cb and event.message else (None if is_cb else event.chat)
-        if user is None or (chat is not None and chat.type != "private"):
-            return await handler(event, data)
-        missing = await sub_missing(user.id)
-        if not missing:
-            return await handler(event, data)
-        if is_cb:
-            await event.answer("Сначала подпишитесь на канал и чат", show_alert=True)
-            if event.message:
-                await event.message.answer(SUB_TEXT, reply_markup=sub_keyboard(missing))
-        else:
-            await event.answer(SUB_TEXT, reply_markup=sub_keyboard(missing))
-        return None
-
-
-router.message.outer_middleware(SubGate())
-router.callback_query.outer_middleware(SubGate())
-
-
 async def flush(outbox: list) -> None:
     for item in outbox:
         tg_id, text, kb = item[:3]
@@ -1026,7 +937,7 @@ async def cmd_start(m: Message, command: CommandObject):
                 u["ref_by"] = inv_uid
                 db_save(db)
                 outbox.append((inv["tg_id"], f"Ваш друг {u['nick']} впервые открыл бота по вашей ссылке. "
-                               f"+{REF_ELO} ELO придёт, когда его ID в игре будет подтверждён.", None))
+                               f"+{REF_ELO} ELO придёт, когда он сыграет свою первую игру.", None))
         await flush(outbox)
     text = ("Топ игроков FACEIT.\n/top - топ-10\n/profile - ваш профиль и пати\n"
             f"Ваш Telegram ID: {m.from_user.id}")
@@ -1034,8 +945,7 @@ async def cmd_start(m: Message, command: CommandObject):
         text += ("\n\nКоманды админа:\n"
                  "/untop ID_или_@ник - убрать игрока из топа\n"
                  "/resetid ID_или_ник - сбросить ID игрока (снимает с поиска и отменяет его матч, даже если он в сети)\n"
-                 "/leaver ID_или_ник [30м|1ч] - вышел из матча раньше времени: матч отменяется, поиск закрыт (по умолчанию 1ч), /unleaver - снять\n"                 "/referral on|off - включить или убрать вкладку «Пригласить друга» на сайте (+30 ELO, когда ID нового игрока подтвердят; не больше 5 в неделю на человека)\n"                 "/subs - проверить обязательную подписку на канал и чат (REQUIRED_CHATS)\n"
-
+                 "/leaver ID_или_ник [30м|1ч] - вышел из матча раньше времени: матч отменяется, поиск закрыт (по умолчанию 1ч), /unleaver - снять\n"                 "/referral on|off - включить или убрать вкладку «Пригласить друга» на сайте (+30 ELO, когда друг сыграет первую игру; не больше 5 в неделю на человека)\n"
 
                  "/ban ID_или_@ник [срок] [причина] - блокировка (срок: 30м, 1ч, 1д; без срока навсегда), /unban, /banlist\n"
                  "/users - зарегистрировались, но ещё не в топе\n"
@@ -1575,36 +1485,6 @@ async def cmd_referral(m: Message, command: CommandObject):
                    + f"Всего приглашено по ссылкам: {total}.")
 
 
-@router.callback_query(F.data == "sub:check")
-async def cb_subcheck(c: CallbackQuery):
-    missing = await sub_missing(c.from_user.id)
-    if missing:
-        names = ", ".join(x["title"] for x in missing)
-        return await c.answer(f"Подписка не найдена: {names}. Подпишитесь и нажмите снова.", show_alert=True)
-    await c.answer("Готово ✅")
-    if c.message:
-        await c.message.answer("Подписка подтверждена ✅ Теперь можно пользоваться ботом. Нажмите /start")
-
-
-@router.message(Command("subs"))
-async def cmd_subs(m: Message):
-    if not is_admin(m):
-        return await m.answer("Нет доступа.")
-    if not REQUIRED:
-        return await m.answer("Обязательная подписка выключена. Задайте переменную REQUIRED_CHATS, например "
-                              "@my_channel,@my_chat, и перезапустите бота.")
-    lines = ["Обязательная подписка:"]
-    for r in REQUIRED:
-        try:
-            me = await bot.get_chat_member(r["chat"], bot.id)
-            chat = await bot.get_chat(r["chat"])
-            good = me.status in ("administrator", "creator")
-            lines.append(f"{'✅' if good else '⚠️'} {chat.title}: бот {'администратор' if good else 'не администратор, сделайте его админом'}")
-        except Exception as e:
-            lines.append(f"❌ {r['chat']}: не удаётся проверить ({str(e)[:80]})")
-    await m.answer("\n".join(lines))
-
-
 @router.message(Command("elo"))
 async def cmd_elo(m: Message):
     lines = ["Система ELO зависит от вашего уровня и формата матча:"]
@@ -1789,18 +1669,6 @@ def api(auth: bool = True):
                 if not isinstance(body, dict):
                     body = {}
             outbox = []
-            sub_list = []
-            if REQUIRED:
-                sess = ((_cache.get("app") or {}).get("sessions") or {}).get(request.headers.get("Authorization", "")[7:])
-                if sess and sess.get("exp", 0) > time.time():
-                    try:
-                        sub_list = await sub_missing(int(sess["uid"]))
-                    except Exception:
-                        sub_list = []
-                if sub_list and request.path not in ("/api/me", "/api/logout"):
-                    return web.json_response({"error": "Подпишитесь на канал и чат, чтобы пользоваться сайтом",
-                                              "sub": sub_list}, status=403, headers=NOSTORE)
-            request["sub"] = sub_list
             try:
                 async with lock:
                     db = db_load()
@@ -1892,7 +1760,6 @@ def api_me(request, db, user, body, outbox, ctx):
                      "ref_reset": (int(ref_recent(db, uid)[0] + REF_WEEK - time.time())
                                    if len(ref_recent(db, uid)) >= REF_WEEK_LIMIT else 0),
                      "ref_link": f"https://t.me/{BOT_USERNAME}?start=ref_{uid}" if BOT_USERNAME else ""}, "cfg": cfg,
-            "sub": request.get("sub") or [],
             "badges": {"friends": sum(1 for r in db["freqs"].values() if r["to"] == uid),
                        "party": sum(1 for i in db["pinvites"].values() if i["to"] == uid)}}
 
@@ -2550,7 +2417,6 @@ async def cb_idv(c: CallbackQuery):
         elif act == "ok":
             u["id_status"], u["id_note"] = "ok", ""
             outbox.append((u["tg_id"], "ID в игре подтверждён ✅ Теперь можно искать игру.", None))
-            pay_ref(db, u, outbox)
             done = f"✅ Подтверждён: {u['nick']} (ID {u['game_id']})"
             db_save(db)
         else:
@@ -2600,7 +2466,6 @@ async def cmd_verify(m: Message, command: CommandObject):
             return await m.answer("Игрок с указанным ID не найден.")
         u["id_status"], u["id_note"] = "ok", ""
         outbox.append((u["tg_id"], "ID в игре подтверждён ✅ Теперь можно искать игру.", None))
-        pay_ref(db, u, outbox)
         db_save(db)
     await m.answer(f"ID подтверждён: {u['nick']} ({u['game_id']}).")
     await flush(outbox)
