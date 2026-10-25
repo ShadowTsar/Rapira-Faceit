@@ -677,7 +677,7 @@ function renderInvite(){
   loadMe().then(function(){
     if(!(S.cfg&&S.cfg.referral)){go("top");return}
     if(!S.me.user){box.appendChild(loginCard());return}
-    var u=S.me.user,link=u.ref_link||"",elo=S.cfg.ref_elo||5;
+    var u=S.me.user,link=u.ref_link||"",elo=S.cfg.ref_elo||30;
     var inp=h("input",{readonly:true,value:link,"aria-label":"Ваша ссылка-приглашение",onclick:function(){this.select()}});
     box.appendChild(h("div",{class:"card"},
       h("h2",{text:"🎁 Пригласите друга в Rapira Faceit"}),
